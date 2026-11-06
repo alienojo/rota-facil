@@ -1,0 +1,21 @@
+body {
+    font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+}
+
+.parada-card {
+    transition: all 0.2s ease;
+}
+
+.parada-card.concluida {
+    opacity: 0.5;
+    border-color: rgba(16, 185, 129, 0.3);
+    background-color: rgba(15, 23, 42, 0.6);
+}
+
+/* Customização dos popups do mapa */
+.leaflet-popup-content-wrapper, .leaflet-popup-tip {
+    background-color: #1e293b !important;
+    color: #f8fafc !important;
+    border: 1px solid #334155;
+    border-radius: 12px;
+}
