@@ -1,3 +1,6 @@
+// CHAVE LOCATIONIQ INTEGRADA
+const LOCATIONIQ_KEY = 'pk.a0eef454d73fac35adb0789e9d5b86c0';
+
 // Elementos da Tela
 const formParada = document.getElementById('form-parada');
 const inputEndereco = document.getElementById('input-endereco');
@@ -13,6 +16,7 @@ const inputFileCamera = document.getElementById('input-file-camera');
 
 // Elementos de Origem (Ponto de Partida)
 const inputOrigem = document.getElementById('input-origem');
+const sugestoesOrigemContainer = document.getElementById('sugestoes-origem-container');
 const btnGpsAtual = document.getElementById('btn-gps-atual');
 const labelStatusOrigem = document.getElementById('label-status-origem');
 
@@ -25,7 +29,10 @@ const btnConcluirAtiva = document.getElementById('btn-concluir-ativa');
 const statusMapa = document.getElementById('status-mapa');
 
 let coordenadaSelecionada = null;
+let coordenadaOrigemSelecionada = null;
 let timeoutBusca = null;
+let timeoutBuscaOrigem = null;
+
 let rotaIniciada = JSON.parse(localStorage.getItem('rotafacil_iniciada')) || false;
 let paradas = JSON.parse(localStorage.getItem('rotafacil_paradas')) || [];
 
@@ -75,19 +82,12 @@ btnGpsAtual.addEventListener('click', () => {
             const lat = position.coords.latitude;
             const lon = position.coords.longitude;
 
-            // Busca o nome do local aproximado pelas coordenadas (Geocodificação Reversa)
             try {
-                const res = await fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lon}`);
+                const res = await fetch(`https://us1.locationiq.com/v1/reverse?key=${LOCATIONIQ_KEY}&lat=${lat}&lon=${lon}&format=json`);
                 const data = await res.json();
                 const nomeLocal = data.display_name ? data.display_name.split(',')[0] + ' (Minha Localização)' : 'Localização Atual';
 
-                origemRota = {
-                    endereco: nomeLocal,
-                    lat: lat,
-                    lon: lon,
-                    personalizado: true
-                };
-
+                origemRota = { endereco: nomeLocal, lat: lat, lon: lon, personalizado: true };
                 inputOrigem.value = nomeLocal;
                 labelStatusOrigem.textContent = "GPS Ativo";
                 btnGpsAtual.innerHTML = `<i class="fa-solid fa-crosshairs text-sm"></i> GPS`;
@@ -109,31 +109,35 @@ btnGpsAtual.addEventListener('click', () => {
     );
 });
 
-// CONFIGURAR ORIGEM DIGITADA
-inputOrigem.addEventListener('change', async () => {
-    const texto = inputOrigem.value.trim();
-    if (!texto) return;
+// AUTOCOMPLETAR DE ORIGEM COM LOCATIONIQ
+inputOrigem.addEventListener('input', (e) => {
+    const termo = e.target.value.trim();
+    coordenadaOrigemSelecionada = null;
 
-    try {
-        const res = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(texto)}&limit=1&countrycodes=br`);
-        const data = await res.json();
-        if (data && data.length > 0) {
+    clearTimeout(timeoutBuscaOrigem);
+    if (termo.length < 3) {
+        sugestoesOrigemContainer.classList.add('hidden');
+        return;
+    }
+
+    timeoutBuscaOrigem = setTimeout(() => {
+        buscarSugestoesLocationIQ(termo, sugestoesOrigemContainer, (item) => {
+            inputOrigem.value = item.display_name;
+            coordenadaOrigemSelecionada = { lat: parseFloat(item.lat), lon: parseFloat(item.lon) };
             origemRota = {
-                endereco: texto,
-                lat: parseFloat(data[0].lat),
-                lon: parseFloat(data[0].lon),
+                endereco: item.display_name,
+                lat: coordenadaOrigemSelecionada.lat,
+                lon: coordenadaOrigemSelecionada.lon,
                 personalizado: true
             };
             labelStatusOrigem.textContent = "Origem Definida";
             salvarERenderizar();
-            alert("📍 Ponto de partida atualizado!");
-        }
-    } catch (err) {
-        alert("Não encontramos esse ponto de partida.");
-    }
+            sugestoesOrigemContainer.classList.add('hidden');
+        });
+    }, 350);
 });
 
-// 3. AUTOCOMPLETAR DE ENDEREÇOS DE ENTREGA
+// 3. AUTOCOMPLETAR DE ENDEREÇOS DE ENTREGA COM LOCATIONIQ
 inputEndereco.addEventListener('input', (e) => {
     const termo = e.target.value.trim();
     coordenadaSelecionada = null;
@@ -144,72 +148,54 @@ inputEndereco.addEventListener('input', (e) => {
         return;
     }
 
-    const termoBuscaRua = termo.split(',')[0].trim();
-
     timeoutBusca = setTimeout(() => {
-        buscarSugestoesCompletas(termoBuscaRua, termo);
+        buscarSugestoesLocationIQ(termo, sugestoesContainer, (item) => {
+            inputEndereco.value = item.display_name;
+            coordenadaSelecionada = { lat: parseFloat(item.lat), lon: parseFloat(item.lon) };
+            sugestoesContainer.classList.add('hidden');
+        });
     }, 350);
 });
 
-async function buscarSugestoesCompletas(termoRua, textoDigitadoPeloUsuario) {
+async function buscarSugestoesLocationIQ(termo, containerDom, callbackSelecao) {
     try {
-        const url = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(termoRua)}&addressdetails=1&limit=6&countrycodes=br`;
+        const url = `https://api.locationiq.com/v1/autocomplete?key=${LOCATIONIQ_KEY}&q=${encodeURIComponent(termo)}&countrycodes=br&accept-language=pt&limit=5`;
         const response = await fetch(url);
         const data = await response.json();
 
-        if (data && data.length > 0) {
-            sugestoesContainer.innerHTML = '';
+        if (Array.isArray(data) && data.length > 0) {
+            containerDom.innerHTML = '';
             data.forEach(item => {
-                const addr = item.address || {};
-                
-                const logradouro = addr.road || addr.pedestrian || addr.suburb || item.display_name.split(',')[0];
-                const bairro = addr.suburb || addr.neighbourhood || addr.city_district || addr.quarter || '';
-                const cidade = addr.city || addr.town || addr.municipality || 'São José dos Campos';
-                const cep = addr.postcode ? `CEP: ${addr.postcode}` : '';
-
-                const matchNumero = textoDigitadoPeloUsuario.match(/\b\d+\b/);
-                const numeroDigitado = matchNumero ? `, Nº ${matchNumero[0]}` : '';
-
-                const partes = [];
-                if (logradouro) partes.push(`${logradouro}${numeroDigitado}`);
-                if (bairro) partes.push(bairro);
-                if (cidade) partes.push(cidade);
-                if (cep) partes.push(cep);
-
-                const enderecoCompletoFormatado = partes.join(' — ');
-
                 const div = document.createElement('div');
                 div.className = 'p-3 hover:bg-slate-700/80 cursor-pointer text-xs text-slate-200 transition border-b border-slate-700/40 last:border-b-0 flex items-center gap-2';
-                div.innerHTML = `<i class="fa-solid fa-location-dot text-emerald-400 shrink-0"></i> <span>${enderecoCompletoFormatado}</span>`;
+                div.innerHTML = `<i class="fa-solid fa-location-dot text-emerald-400 shrink-0"></i> <span>${item.display_name}</span>`;
                 
                 div.addEventListener('click', () => {
-                    inputEndereco.value = enderecoCompletoFormatado;
-                    coordenadaSelecionada = {
-                        lat: parseFloat(item.lat),
-                        lon: parseFloat(item.lon)
-                    };
-                    sugestoesContainer.classList.add('hidden');
+                    callbackSelecao(item);
                 });
 
-                sugestoesContainer.appendChild(div);
+                containerDom.appendChild(div);
             });
-            sugestoesContainer.classList.remove('hidden');
+            containerDom.classList.remove('hidden');
+        } else {
+            containerDom.classList.add('hidden');
         }
     } catch (err) {
-        console.error("Erro no autocompletar:", err);
+        console.error("Erro no autocompletar LocationIQ:", err);
     }
 }
 
 document.addEventListener('click', (e) => {
     if (!formParada.contains(e.target)) sugestoesContainer.classList.add('hidden');
+    if (!inputOrigem.contains(e.target) && !sugestoesOrigemContainer.contains(e.target)) sugestoesOrigemContainer.classList.add('hidden');
 });
 
-// GEOCODIFICAÇÃO
+// GEOCODIFICAÇÃO PRECISA (LocationIQ)
 async function geocodificarComPrecisao(enderecoCompleto) {
     if (coordenadaSelecionada) return coordenadaSelecionada;
 
     try {
-        let url = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(enderecoCompleto)}&limit=1&countrycodes=br`;
+        let url = `https://us1.locationiq.com/v1/search?key=${LOCATIONIQ_KEY}&q=${encodeURIComponent(enderecoCompleto)}&format=json&countrycodes=br&limit=1`;
         let response = await fetch(url);
         let data = await response.json();
 
@@ -262,8 +248,6 @@ btnOtimizar.addEventListener('click', async () => {
 
     let naoVisitadas = [...paradas];
     let otimizadas = [];
-    
-    // A partir da origem definida, encontra a parada mais próxima para ser a primeira da rota
     let pontoAtual = { lat: origemRota.lat, lon: origemRota.lon };
 
     while (naoVisitadas.length > 0) {
@@ -296,7 +280,6 @@ async function atualizarMapaERotas() {
 
     let groupBounds = [[origemRota.lat, origemRota.lon]];
 
-    // Marcador especial de Origem (Ponto de Partida)
     const iconOrigem = L.divIcon({
         className: 'custom-marker-origem',
         html: `<div style="background-color: #3b82f6; color: #ffffff; font-weight: bold; width: 32px; height: 32px; border-radius: 50%; display: flex; align-items: center; justify-content: center; border: 2px solid #ffffff; box-shadow: 0 4px 10px rgba(0,0,0,0.5); font-size: 14px;"><i class="fa-solid fa-house"></i></div>`,
@@ -307,7 +290,7 @@ async function atualizarMapaERotas() {
     markersLayer.addLayer(markerOrigem);
 
     if (paradas.length === 0) {
-        map.setView([origemRota.lat, origemRota.lon], 14);
+        map.setView([origemRota.lat, origemRota.lon], 13);
         return;
     }
 
@@ -333,7 +316,6 @@ async function atualizarMapaERotas() {
         map.fitBounds(groupBounds, { padding: [40, 40] });
     }
 
-    // Traçado das ruas unindo Origem -> Paradas
     if (paradas.length > 0) {
         const pontosRota = [
             [origemRota.lat, origemRota.lon],
@@ -412,14 +394,13 @@ btnCamera.addEventListener('click', () => inputFileCamera.click());
 inputFileCamera.addEventListener('change', (e) => {
     if (e.target.files[0]) {
         setTimeout(() => {
-            inputEndereco.value = "Rua Votuporanga, Nº 264 — Bosque dos Eucaliptos — São José dos Campos — CEP: 12233-310";
+            inputEndereco.value = "Rua Votuporanga, Nº 264 — Bosque dos Eucaliptos — São José dos Campos";
             coordenadaSelecionada = { lat: -23.2200, lon: -45.8900 };
             alert("📸 Endereço capturado!");
         }, 600);
     }
 });
 
-// AÇÕES INDIVIDUAIS
 function alternarConcluida(id) {
     paradas = paradas.map(p => {
         if (p.id === id) p.concluida = !p.concluida;
