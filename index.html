@@ -1,122 +1,143 @@
 <!DOCTYPE html>
 <html lang="pt-BR">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Rota Fácil - Otimizador de Entregas</title>
-  <script src="https://cdn.tailwindcss.com"></script>
-  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RotaFácil - Spoke Clone</title>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Leaflet CSS (Mapa) -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <link rel="stylesheet" href="style.css">
+    <!-- Ícones FontAwesome -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
 </head>
-<body class="bg-slate-900 text-slate-100 min-h-screen pb-10">
+<body class="bg-slate-900 text-slate-100 min-h-screen flex flex-col">
 
-  <header class="bg-slate-800 border-b border-slate-700/60 p-4 sticky top-0 z-40 shadow-md">
-    <div class="max-w-md mx-auto flex justify-between items-center">
-      <h1 class="text-lg font-bold text-blue-400 flex items-center gap-2">
-        🚚 Rota Fácil
-      </h1>
-      <span class="text-xs bg-blue-900/60 text-blue-300 border border-blue-700/50 px-2.5 py-1 rounded-full font-medium">
-        PWA Ready
-      </span>
-    </div>
-  </header>
-
-  <main class="max-w-md mx-auto p-4 space-y-4">
-
-    <!-- PONTO DE PARTIDA -->
-    <section class="bg-slate-800 p-4 rounded-xl shadow-lg border border-slate-700/60">
-      <label class="block text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">
-        📍 Ponto de Partida / Início da Rota
-      </label>
-      <div class="relative">
-        <div class="flex gap-2">
-          <input 
-            type="text" 
-            id="originInput" 
-            placeholder="Digite o endereço inicial (Rua, nº, Bairro)" 
-            class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-blue-500"
-            autocomplete="off"
-          />
-          <button 
-            id="btnSetOrigin" 
-            class="bg-blue-600 hover:bg-blue-500 text-white text-sm font-medium px-4 py-2 rounded-lg transition-colors flex-shrink-0"
-          >
-            Salvar
-          </button>
+    <!-- Cabeçalho -->
+    <header class="bg-slate-800 border-b border-slate-700 p-4 sticky top-0 z-50 shadow-md">
+        <div class="max-w-md mx-auto flex justify-between items-center">
+            <h1 class="text-xl font-bold flex items-center gap-2">
+                <i class="fa-solid fa-route text-emerald-400"></i> RotaFácil
+            </h1>
+            <span id="contador-paradas" class="text-xs bg-slate-700 px-3 py-1 rounded-full text-slate-300">0 paradas</span>
         </div>
-        <ul id="originSuggestions" class="hidden absolute z-50 left-0 right-0 mt-1 bg-slate-900 border border-slate-700 rounded-lg shadow-xl max-h-48 overflow-y-auto text-sm text-slate-200"></ul>
-      </div>
-      <p id="currentOriginText" class="text-xs text-slate-400 mt-2 italic">Partida atual: Não definida</p>
-    </section>
+    </header>
 
-    <!-- ADICIONAR NOVA ENTREGA -->
-    <section class="bg-slate-800 p-4 rounded-xl shadow-lg border border-slate-700/60">
-      <label class="block text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">
-        📦 Adicionar Endereço de Entrega
-      </label>
-      <div class="relative mb-3">
-        <div class="flex gap-2">
-          <input 
-            type="text" 
-            id="stopInput" 
-            placeholder="Rua, Número, Bairro, CEP" 
-            class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-blue-500"
-            autocomplete="off"
-          />
-          <button 
-            id="btnAddStop" 
-            class="bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-medium px-4 py-2 rounded-lg transition-colors flex-shrink-0"
-          >
-            Adicionar
-          </button>
+    <!-- Conteúdo Principal -->
+    <main class="flex-1 max-w-md w-full mx-auto p-4 pb-24 space-y-4">
+        
+        <!-- MAPA NA PÁGINA PRINCIPAL -->
+        <div class="bg-slate-800 border border-slate-700 rounded-2xl overflow-hidden shadow-lg relative">
+            <div id="map" class="w-full h-64 z-10"></div>
+            
+            <!-- Indicador de Status no Mapa -->
+            <div id="status-mapa" class="hidden absolute top-3 right-3 bg-slate-900/90 border border-slate-700 text-emerald-400 text-xs px-3 py-1.5 rounded-full z-20 font-semibold backdrop-blur-sm flex items-center gap-2">
+                <span class="w-2 h-2 rounded-full bg-emerald-400 animate-ping"></span>
+                <span>Rota Ativa</span>
+            </div>
         </div>
-        <ul id="stopSuggestions" class="hidden absolute z-50 left-0 right-0 mt-1 bg-slate-900 border border-slate-700 rounded-lg shadow-xl max-h-48 overflow-y-auto text-sm text-slate-200"></ul>
-      </div>
-    </section>
 
-    <!-- PAINEL BOLA DA VEZ -->
-    <section id="nextStopPanel" class="hidden bg-gradient-to-r from-blue-900/40 to-indigo-900/40 border border-blue-500/30 p-4 rounded-xl shadow-lg">
-      <div class="flex justify-between items-start mb-2">
-        <span class="text-xs font-bold text-blue-400 uppercase tracking-wide">🔥 Bola da Vez (Próxima Parada)</span>
-        <span id="nextStopIndex" class="text-xs bg-blue-500/20 text-blue-300 px-2 py-0.5 rounded font-mono">#1</span>
-      </div>
-      <p id="nextStopAddress" class="text-base font-semibold text-white mb-3">---</p>
-      <div class="flex gap-2">
-        <button id="btnOpenGmaps" class="flex-1 bg-emerald-700 hover:bg-emerald-600 text-white text-xs font-bold py-2 px-3 rounded-lg flex items-center justify-center gap-1">
-          🗺️ Google Maps
-        </button>
-        <button id="btnOpenWaze" class="flex-1 bg-cyan-700 hover:bg-cyan-600 text-white text-xs font-bold py-2 px-3 rounded-lg flex items-center justify-center gap-1">
-          💧 Waze
-        </button>
-        <button id="btnCompleteStop" class="bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold py-2 px-3 rounded-lg">
-          ✅ Concluir
-        </button>
-      </div>
-    </section>
+        <!-- PAINEL DA BOLA DA VEZ -->
+        <div id="painel-bola-da-vez" class="hidden bg-gradient-to-r from-emerald-950/80 to-slate-800 border-2 border-emerald-500/50 rounded-2xl p-4 shadow-xl space-y-3">
+            <div class="flex justify-between items-center">
+                <span class="text-xs font-bold text-emerald-400 uppercase tracking-widest flex items-center gap-1.5">
+                    <i class="fa-solid fa-bullseye"></i> Próxima Entrega
+                </span>
+                <span id="distancia-tempo-estimado" class="text-xs text-slate-400 font-mono">Em andamento</span>
+            </div>
+            
+            <div class="flex items-center gap-3">
+                <span id="numero-bola-da-vez" class="w-9 h-9 rounded-full bg-emerald-500 text-slate-950 font-extrabold flex items-center justify-center text-base shrink-0 shadow-lg shadow-emerald-500/30">
+                    1
+                </span>
+                <h3 id="endereco-bola-da-vez" class="text-sm font-bold text-slate-100 line-clamp-2">---</h3>
+            </div>
 
-    <!-- MAPA E CONTROLES -->
-    <section class="bg-slate-800 rounded-xl shadow-lg border border-slate-700/60 overflow-hidden">
-      <div id="map" class="w-full h-64 bg-slate-950"></div>
-      <div class="p-3 bg-slate-800 border-t border-slate-700/60 flex justify-between gap-2">
-        <button id="btnOptimize" class="flex-1 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold py-2.5 rounded-lg transition-colors">
-          ⚡ Otimizar Rota
-        </button>
-        <button id="btnClearAll" class="bg-slate-700 hover:bg-slate-600 text-slate-300 text-xs font-semibold py-2.5 px-3 rounded-lg transition-colors">
-          🗑️ Limpar
-        </button>
-      </div>
-    </section>
+            <div class="flex gap-2 pt-1">
+                <a id="btn-navegar-ativa" href="#" target="_blank" class="flex-1 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold py-2.5 rounded-xl text-xs text-center transition flex items-center justify-center gap-2 shadow-md">
+                    <i class="fa-solid fa-location-arrow"></i> Navegar Agora (GPS)
+                </a>
+                <button id="btn-concluir-ativa" class="bg-slate-700 hover:bg-slate-600 text-emerald-400 px-4 py-2.5 rounded-xl text-xs font-bold transition flex items-center justify-center gap-1.5 border border-slate-600">
+                    <i class="fa-solid fa-check"></i> Entregue
+                </button>
+            </div>
+        </div>
 
-    <!-- LISTA DE ENTREGAS -->
-    <section class="bg-slate-800 p-4 rounded-xl shadow-lg border border-slate-700/60">
-      <h2 class="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-3">
-        📋 Lista de Entregas (<span id="stopCount">0</span>)
-      </h2>
-      <ul id="stopsList" class="space-y-2 text-sm"></ul>
-    </section>
+        <!-- CONFIGURAÇÃO DO PONTO DE PARTIDA -->
+        <div class="bg-slate-800 border border-slate-700 rounded-2xl p-4 shadow-lg space-y-2">
+            <div class="flex justify-between items-center">
+                <h2 class="text-xs font-semibold text-slate-400 uppercase tracking-wider flex items-center gap-1.5">
+                    <i class="fa-solid fa-location-crosshairs text-emerald-400"></i> Ponto de Partida (Origem)
+                </h2>
+                <span id="label-status-origem" class="text-[10px] bg-emerald-500/20 text-emerald-400 px-2 py-0.5 rounded-full font-medium">Padrão: SJC</span>
+            </div>
+            
+            <div class="flex gap-2">
+                <input type="text" id="input-origem" autocomplete="off" placeholder="Ex: Minha Casa / Depósito" class="flex-1 bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs text-slate-100 focus:outline-none focus:border-emerald-500">
+                
+                <button type="button" id="btn-gps-atual" title="Usar minha localização atual (GPS)" class="bg-slate-700 hover:bg-slate-600 text-emerald-400 px-3 py-2 rounded-xl transition text-xs font-semibold flex items-center gap-1.5">
+                    <i class="fa-solid fa-crosshairs text-sm"></i> GPS
+                </button>
+            </div>
+        </div>
 
-  </main>
+        <!-- Formulário para Adicionar Parada -->
+        <form id="form-parada" class="bg-slate-800 border border-slate-700 rounded-2xl p-4 shadow-lg space-y-3 relative z-30">
+            <h2 class="text-sm font-semibold text-slate-400 uppercase tracking-wider">Adicionar Endereço de Entrega</h2>
+            
+            <div class="space-y-2">
+                <div class="flex gap-2 relative">
+                    <div class="relative flex-1">
+                        <input type="text" id="input-endereco" autocomplete="off" required placeholder="Ex: Rua Votuporanga, 264..." class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-sm text-slate-100 focus:outline-none focus:border-emerald-500">
+                        <div id="sugestoes-container" class="hidden absolute left-0 right-0 top-full mt-1 bg-slate-800 border border-slate-700 rounded-xl shadow-2xl max-h-48 overflow-y-auto z-50 divide-y divide-slate-700/50"></div>
+                    </div>
+                    
+                    <button type="button" id="btn-camera" title="Escanear com a Câmera" class="bg-slate-700 hover:bg-slate-600 text-emerald-400 px-3.5 py-2 rounded-xl transition flex items-center justify-center text-xs font-semibold shrink-0">
+                        <i class="fa-solid fa-camera text-base"></i>
+                    </button>
+                    <input type="file" id="input-file-camera" accept="image/*" capture="environment" class="hidden">
+                </div>
 
-  <script src="app.js"></script>
+                <button type="submit" class="w-full bg-slate-700 hover:bg-slate-600 text-slate-100 font-semibold py-2.5 rounded-xl transition text-sm flex items-center justify-center gap-2 border border-slate-600">
+                    <i class="fa-solid fa-plus text-emerald-400"></i> Adicionar à Lista
+                </button>
+            </div>
+        </form>
+
+        <!-- AÇÕES DE ROTA -->
+        <div class="flex flex-col gap-2">
+            <button id="btn-comecar-rota" class="w-full bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-extrabold py-3 rounded-xl text-sm transition flex items-center justify-center gap-2 shadow-lg shadow-emerald-500/20">
+                <i class="fa-solid fa-play text-base"></i> Começar Rota
+            </button>
+
+            <div class="flex gap-2">
+                <button id="btn-otimizar" class="flex-1 bg-blue-600 hover:bg-blue-500 text-white font-semibold py-2.5 rounded-xl text-sm transition flex items-center justify-center gap-2 shadow-md">
+                    <i class="fa-solid fa-wand-magic-sparkles"></i> Otimizar Rota
+                </button>
+                <button id="btn-limpar" class="bg-rose-500/20 hover:bg-rose-500/30 text-rose-400 border border-rose-500/30 px-4 py-2.5 rounded-xl text-sm transition" title="Limpar concluídas">
+                    <i class="fa-solid fa-trash-can"></i>
+                </button>
+            </div>
+        </div>
+
+        <!-- Lista de Paradas -->
+        <div class="space-y-3 pt-2">
+            <h2 class="text-sm font-semibold text-slate-400 uppercase tracking-wider">Sequência das Entregas</h2>
+            <div id="lista-entregas" class="space-y-3"></div>
+        </div>
+
+        <!-- BOTÃO DE RESETAR ROTA -->
+        <div class="pt-6 border-t border-slate-800">
+            <button id="btn-resetar-rota" class="w-full bg-rose-600/10 hover:bg-rose-600/20 text-rose-400 border border-rose-500/30 font-bold py-3 rounded-xl text-xs transition flex items-center justify-center gap-2">
+                <i class="fa-solid fa-rotate-right"></i> Iniciar Outra Rota (Apagar Tudo)
+            </button>
+        </div>
+
+    </main>
+
+    <!-- Leaflet JS (Mapa) -->
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="app.js"></script>
 </body>
 </html>
