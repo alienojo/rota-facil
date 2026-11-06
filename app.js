@@ -71,7 +71,7 @@ function salvarERenderizar() {
 // 2. CONFIGURAR ORIGEM VIA GPS DO APARELHO
 btnGpsAtual.addEventListener('click', () => {
     if (!navigator.geolocation) {
-        alert("Seu navegador não suporta geolocalização.");
+        alert("O seu navegador não suporta geolocalização.");
         return;
     }
 
@@ -92,7 +92,7 @@ btnGpsAtual.addEventListener('click', () => {
                 labelStatusOrigem.textContent = "GPS Ativo";
                 btnGpsAtual.innerHTML = `<i class="fa-solid fa-crosshairs text-sm"></i> GPS`;
                 salvarERenderizar();
-                alert("📍 Ponto de partida definido com sucesso para sua localização atual!");
+                alert("📍 Ponto de partida definido com sucesso para a sua localização atual!");
             } catch (err) {
                 origemRota = { endereco: "Localização GPS", lat: lat, lon: lon, personalizado: true };
                 inputOrigem.value = "Minha Localização Atual";
@@ -103,13 +103,13 @@ btnGpsAtual.addEventListener('click', () => {
         },
         (error) => {
             btnGpsAtual.innerHTML = `<i class="fa-solid fa-crosshairs text-sm"></i> GPS`;
-            alert("Não foi possível obter sua localização. Verifique as permissões do GPS.");
+            alert("Não foi possível obter a sua localização. Verifique as permissões do GPS.");
         },
         { enableHighAccuracy: true }
     );
 });
 
-// AUTOCOMPLETAR DE ORIGEM COM LOCATIONIQ
+// AUTOCOMPLETAR DE ORIGEM COM LOCATIONIQ E PRESERVAÇÃO DE NÚMERO
 inputOrigem.addEventListener('input', (e) => {
     const termo = e.target.value.trim();
     coordenadaOrigemSelecionada = null;
@@ -120,12 +120,14 @@ inputOrigem.addEventListener('input', (e) => {
         return;
     }
 
+    const termoBuscaRua = termo.split(',')[0].trim();
+
     timeoutBuscaOrigem = setTimeout(() => {
-        buscarSugestoesLocationIQ(termo, sugestoesOrigemContainer, (item) => {
-            inputOrigem.value = item.display_name;
+        buscarSugestoesLocationIQ(termoBuscaRua, termo, sugestoesOrigemContainer, (item, enderecoFormatadoFinal) => {
+            inputOrigem.value = enderecoFormatadoFinal;
             coordenadaOrigemSelecionada = { lat: parseFloat(item.lat), lon: parseFloat(item.lon) };
             origemRota = {
-                endereco: item.display_name,
+                endereco: enderecoFormatadoFinal,
                 lat: coordenadaOrigemSelecionada.lat,
                 lon: coordenadaOrigemSelecionada.lon,
                 personalizado: true
@@ -137,7 +139,7 @@ inputOrigem.addEventListener('input', (e) => {
     }, 350);
 });
 
-// 3. AUTOCOMPLETAR DE ENDEREÇOS DE ENTREGA COM LOCATIONIQ
+// 3. AUTOCOMPLETAR DE ENDEREÇOS DE ENTREGA COM LOCATIONIQ E PRESERVAÇÃO DE NÚMERO
 inputEndereco.addEventListener('input', (e) => {
     const termo = e.target.value.trim();
     coordenadaSelecionada = null;
@@ -148,30 +150,48 @@ inputEndereco.addEventListener('input', (e) => {
         return;
     }
 
+    // Isola a rua antes da vírgula para buscar melhor na API
+    const termoBuscaRua = termo.split(',')[0].trim();
+
     timeoutBusca = setTimeout(() => {
-        buscarSugestoesLocationIQ(termo, sugestoesContainer, (item) => {
-            inputEndereco.value = item.display_name;
+        buscarSugestoesLocationIQ(termoBuscaRua, termo, sugestoesContainer, (item, enderecoFormatadoFinal) => {
+            inputEndereco.value = enderecoFormatadoFinal;
             coordenadaSelecionada = { lat: parseFloat(item.lat), lon: parseFloat(item.lon) };
             sugestoesContainer.classList.add('hidden');
         });
     }, 350);
 });
 
-async function buscarSugestoesLocationIQ(termo, containerDom, callbackSelecao) {
+async function buscarSugestoesLocationIQ(termoBusca, textoDigitadoPeloUsuario, containerDom, callbackSelecao) {
     try {
-        const url = `https://api.locationiq.com/v1/autocomplete?key=${LOCATIONIQ_KEY}&q=${encodeURIComponent(termo)}&countrycodes=br&accept-language=pt&limit=5`;
+        const url = `https://api.locationiq.com/v1/autocomplete?key=${LOCATIONIQ_KEY}&q=${encodeURIComponent(termoBusca)}&countrycodes=br&accept-language=pt&limit=5`;
         const response = await fetch(url);
         const data = await response.json();
 
         if (Array.isArray(data) && data.length > 0) {
             containerDom.innerHTML = '';
             data.forEach(item => {
+                // Extrai o número que o usuário digitou (ex: "264")
+                const matchNumero = textoDigitadoPeloUsuario.match(/\b\d+\b/);
+                const numeroDigitado = matchNumero ? `, Nº ${matchNumero[0]}` : '';
+
+                // Reconstrói o endereço garantindo que o número digitado apareça na sugestão
+                let baseDisplay = item.display_name;
+                const partes = baseDisplay.split(',');
+                
+                let enderecoFinal = baseDisplay;
+                if (matchNumero && !baseDisplay.includes(matchNumero[0])) {
+                    // Insere o número logo após o primeiro segmento (rua)
+                    partes.splice(1, 0, ` Nº ${matchNumero[0]}`);
+                    enderecoFinal = partes.join(',');
+                }
+
                 const div = document.createElement('div');
                 div.className = 'p-3 hover:bg-slate-700/80 cursor-pointer text-xs text-slate-200 transition border-b border-slate-700/40 last:border-b-0 flex items-center gap-2';
-                div.innerHTML = `<i class="fa-solid fa-location-dot text-emerald-400 shrink-0"></i> <span>${item.display_name}</span>`;
+                div.innerHTML = `<i class="fa-solid fa-location-dot text-emerald-400 shrink-0"></i> <span>${enderecoFinal}</span>`;
                 
                 div.addEventListener('click', () => {
-                    callbackSelecao(item);
+                    callbackSelecao(item, enderecoFinal);
                 });
 
                 containerDom.appendChild(div);
@@ -417,7 +437,7 @@ function excluirParada(id) {
 btnLimpar.addEventListener('click', () => {
     paradas = paradas.filter(p => !p.concluida);
     salvarERenderizar();
-});
+}
 
 function renderizarParadas() {
     listaEntregas.innerHTML = '';
