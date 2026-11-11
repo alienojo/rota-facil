@@ -1,14 +1,15 @@
 (() => {
   'use strict';
 
-  // RotaFácil V9 — HTML/CSS/JS puro. Sem cadastros ou chaves exigidas do motorista.
+  // RotaFácil V10 — busca por número + chegada pela rua + fallback confiável. Sem cadastros ou chaves exigidas do motorista.
   // Photon oferece busca conforme digita; ViaCEP complementa rua, bairro e CEP.
   // Para escala comercial, hospede um serviço de geocodificação com SLA/proxy próprio.
   const CFG = Object.freeze({
     photon: 'https://photon.komoot.io', viaCep: 'https://viacep.com.br/ws',
     osrm: 'https://router.project-osrm.org',
+    overpass: 'https://overpass-api.de/api/interpreter',
     mapStyle: 'https://tiles.openfreemap.org/styles/positron',
-    debounceMs: 480, timeoutMs: 9000, maxStopsForRoadMatrix: 23,
+    debounceMs: 480, timeoutMs: 9000, maxStopsForRoadMatrix: 23, maxAddressChecks: 6,
     defaultOrigin: { endereco: 'Centro de São José dos Campos, SP', lat: -23.1794, lon: -45.8869, personalizado: false }
   });
   const ID = id => document.getElementById(id);
@@ -47,9 +48,13 @@
       lat: Number(item.lat), lon: Number(item.lon), concluida: Boolean(item.concluida),
       precision: item.precision || item.precisao || 'aproximada',
       city: String(item.city || item.campos?.cidade || ''), uf: String(item.uf || item.campos?.uf || 'SP'),
-      number: String(item.number || item.campos?.numero || ''),
+      number: String(item.number || item.campos?.numero || parseAddress(item.endereco).number || ''),
       urgent: Boolean(item.urgent || item.urgente),
-      notes: String(item.notes || item.notas || '').slice(0, 200)
+      notes: String(item.notes || item.notas || '').slice(0, 200),
+      road: String(item.road || parseAddress(item.endereco).road || ''), district: String(item.district || ''),
+      propertyLat: validPoint({lat:item.propertyLat,lon:item.propertyLon}) ? Number(item.propertyLat) : null,
+      propertyLon: validPoint({lat:item.propertyLat,lon:item.propertyLon}) ? Number(item.propertyLon) : null,
+      locationChecked: Boolean(item.locationChecked), accessConfirmed: Boolean(item.accessConfirmed)
     };
   }
   let stops = (Array.isArray(getJSON(STORE.stops, [])) ? getJSON(STORE.stops, []) : []).map(cleanedStop).filter(Boolean);
@@ -131,7 +136,7 @@
     return { road: road || cleaned, number, extra, postcode, raw };
   }
   // Parsing fixture exposed for automated checks without exposing implementation to page UI.
-  window.__rotafacilTest = Object.freeze({ parseAddress });
+  window.__rotafacilTest = Object.freeze({ parseAddress, normalizeRoad });
 
   async function getJSONRemote(url, { signal, timeout = CFG.timeoutMs } = {}) {
     const controller = new AbortController();
@@ -141,7 +146,15 @@
     const timer = setTimeout(() => controller.abort(), timeout);
     try {
       const response = await fetch(url, { signal: controller.signal, headers: { Accept: 'application/json' } });
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      if (!response.ok) {
+        // O erro técnico fica no console; o motorista recebe mensagem compreensível.
+        const source = url.includes('photon.komoot.io') ? 'Photon' : url.includes('viacep.com.br') ? 'ViaCEP' : 'Serviço de rotas';
+        console.warn(`RotaFácil: ${source} respondeu HTTP ${response.status}`);
+        const error = new Error(`Serviço indisponível (${source}, ${response.status})`);
+        error.status = response.status;
+        error.service = source;
+        throw error;
+      }
       return await response.json();
     } finally { clearTimeout(timer); signal?.removeEventListener('abort', relay); }
   }
@@ -167,7 +180,7 @@
     const p = feature.properties || {};
     const country = String(p.countrycode || '').toLowerCase();
     if (country && country !== 'br') return null;
-    const road = p.street || p.name || '';
+    const road = p.street || ((p.osm_key === 'highway' || p.type === 'street') ? p.name : '') || '';
     const city = p.city || p.town || p.locality || p.county || '';
     if (!road) return null;
     return { road: String(road), district: String(p.district || p.suburb || p.neighbourhood || p.city_district || ''),
@@ -186,6 +199,8 @@
     else if (street.startsWith(typed)) value += 90;
     else if (street.includes(typed)) value += 42;
     else if (typed.includes(street) && street.length >= 5) value += 25;
+    if (query.number && candidate.house) value += norm(candidate.house) === norm(query.number) ? 260 : -350;
+    if (candidate.city && norm(candidate.city) !== norm(userArea.city)) value -= 120;
     if (norm(candidate.city) === norm(userArea.city)) value += 55;
     if (norm(candidate.district) && norm(query.extra).includes(norm(candidate.district))) value += 12;
     if (candidate.source === 'viacep') value += 12;
@@ -205,7 +220,8 @@
   function mergeCandidates(a, b) {
     const merged = new Map();
     for (const c of [...a, ...b]) {
-      const key = [norm(c.road), norm(c.district), norm(c.city)].join('|');
+      // Um imóvel com número próprio jamais pode ser fundido a um trecho genérico da rua.
+      const key = [norm(c.road), norm(c.district), norm(c.city), norm(c.house)].join('|');
       const prev = merged.get(key);
       if (!prev) merged.set(key, c);
       else merged.set(key, { ...prev, ...c,
@@ -226,7 +242,8 @@
     highlighted = -1;
   }
   function renderSuggestions(query, candidates, userArea, waiting = false) {
-    const ordered = candidates.map(c => ({ c, rank: score(c, query, userArea) })).sort((a,b) => b.rank - a.rank).slice(0, 8).map(x=>x.c);
+    const ordered = candidates.filter(c => !query.number || !c.house || norm(c.house) === norm(query.number))
+      .map(c => ({ c, rank: score(c, query, userArea) })).sort((a,b) => b.rank - a.rank).slice(0, 8).map(x=>x.c);
     currentSuggestions = ordered;
     highlighted = -1;
     ui.listbox.replaceChildren();
@@ -245,8 +262,13 @@
       const title = document.createElement('strong'); title.textContent = info.title;
       const sub = document.createElement('small'); sub.textContent = info.sub;
       body.append(title, sub);
-      if (query.number && !(candidate.house && norm(candidate.house) === norm(query.number))) {
-        const warn = document.createElement('em'); warn.textContent = 'Número informado por você · posição do imóvel não confirmada';
+      if (query.number && candidate.house && norm(candidate.house) === norm(query.number)) {
+        const ok = document.createElement('em'); ok.className = 'verified';
+        ok.textContent = 'Número encontrado no cadastro de endereços';
+        body.appendChild(ok);
+      } else if (query.number) {
+        const warn = document.createElement('em');
+        warn.textContent = 'Número preservado · posição aproximada da rua';
         body.appendChild(warn);
       }
       button.append(icon, body);
@@ -271,10 +293,31 @@
     ui.add.focus();
   }
   async function getPhotonCandidates(query, userArea, signal) {
-    const requested = `${query.road}, ${userArea.city}, ${userArea.uf}, Brasil`;
-    const url = `${CFG.photon}/api/?q=${encodeURIComponent(requested)}&lat=${origin.lat}&lon=${origin.lon}&limit=12&lang=pt`;
-    const data = await photonJSON(url, signal);
-    return (Array.isArray(data.features) ? data.features : []).map(featureToCandidate).filter(Boolean);
+    // Pesquise primeiro o endereço completo, INCLUINDO o número da residência.
+    // A busca de rua é apenas o plano B: ela nunca será rotulada como número exato.
+    const fetchByText = async (text) => {
+      const params = new URLSearchParams({ q: text, limit: '12', countrycode: 'BR',
+        lat: String(origin.lat), lon: String(origin.lon) });
+      const json = await photonJSON(`${CFG.photon}/api?${params.toString()}`, signal);
+      return (Array.isArray(json.features) ? json.features : []).map(featureToCandidate).filter(Boolean);
+    };
+    const full = query.number ? `${query.road} ${query.number}, ${userArea.city}` : `${query.road}, ${userArea.city}`;
+    let result = [];
+    try { result = await fetchByText(full); }
+    catch (error) { if (signal?.aborted) throw error; console.warn('Pesquisa completa:', error); }
+    if (signal?.aborted) throw new DOMException('Cancelada', 'AbortError');
+    // Rua + número nem sempre está disponível no OpenStreetMap.
+    const hasMatchingStreet = result.some(c => normalizeRoad(c.road) === normalizeRoad(query.road));
+    const hasHouse = result.some(c => c.house && norm(c.house) === norm(query.number) &&
+      normalizeRoad(c.road) === normalizeRoad(query.road));
+    if (!hasMatchingStreet || (query.number && !hasHouse)) {
+      try {
+        const extra = await fetchByText(query.road);
+        result = mergeCandidates(result, extra);
+      } catch (error) { if (!result.length) throw error; if (signal?.aborted) throw error; }
+    }
+    // Não oferecer números de imóveis diferentes como se fossem o número digitado.
+    return result.filter(c => !query.number || !c.house || norm(c.house) === norm(query.number));
   }
   async function getViaCepCandidates(query, userArea, signal) {
     const road = query.road.replace(/^(rua|avenida|av\.?|travessa|alameda|praca|praça)\s+/i,'').trim();
@@ -356,7 +399,7 @@
   });
   for (const input of [ui.city, ui.state]) input.addEventListener('change', () => { selected = null; inputChange(); save(); });
 
-  // ---- Obtain coordinates. Never present an inserted house number as confirmed unless Photon returned it. ----
+  // ---- Localizar: preservar coordenadas de sugestão selecionada sem repetir uma requisição frágil. ----
   async function resolveCoordinates(candidate, userArea, signal) {
     const parsed = parseAddress(candidate.address || ui.input.value);
     const house = candidate.typedNumber || candidate.number || parsed.number;
@@ -365,11 +408,14 @@
     const uf = /^[A-Z]{2}$/.test(candidate.uf || '') ? candidate.uf : userArea.uf;
     const originalPoint = validPoint(candidate) ? { lat: Number(candidate.lat), lon: Number(candidate.lon) } : null;
     if (candidate.precision === 'exata' && originalPoint) return { ...originalPoint, precision: 'exata' };
-    // Structured Photon search is the only extra call; when the house is not mapped, preserve road position.
+    // Se a sugestão já trouxe coordenadas, salvar diretamente evita consultas
+    // adicionais que podem demorar ou falhar. Número desconhecido segue aproximado.
+    if (originalPoint) return { ...originalPoint, precision: 'aproximada' };
+    // Só consultar outra vez quando a sugestão (ex.: ViaCEP) não tiver coordenadas.
     if (house) {
       try {
-        const url = `${CFG.photon}/structured?street=${encodeURIComponent(road)}&housenumber=${encodeURIComponent(house)}&city=${encodeURIComponent(city)}&state=${encodeURIComponent(uf)}&countrycode=BR&limit=5`;
-        const res = await photonJSON(url, signal);
+        const params = new URLSearchParams({ street: road, housenumber: String(house), city, countrycode: 'BR', limit: '5' });
+        const res = await photonJSON(`${CFG.photon}/structured?${params}`, signal);
         for (const feature of res.features || []) {
           const props = feature.properties || {};
           const found = featureToCandidate(feature);
@@ -383,7 +429,8 @@
     const q = { road, number: house, extra: candidate.district || '', raw: road };
     const matches = await getPhotonCandidates(q, { city, uf }, signal);
     const suitable = matches.sort((a,b) => score(b,q,{city,uf})-score(a,q,{city,uf})).find(c =>
-      normalizeRoad(c.road) === normalizeRoad(road) && (!c.city || norm(c.city) === norm(city)));
+      normalizeRoad(c.road) === normalizeRoad(road) && (!c.city || norm(c.city) === norm(city)) &&
+      (!c.house || norm(c.house)===norm(house)));
     if (!suitable) throw new Error('Encontrei a rua no cadastro, mas não consegui posicioná-la no mapa. Tente selecionar outra sugestão.');
     return { lat: suitable.lat, lon: suitable.lon, precision: 'aproximada' };
   }
@@ -391,7 +438,9 @@
     const addr = c.address || c.raw || fallback;
     return { endereco: addr, lat: coordinate.lat, lon: coordinate.lon,
       number: c.typedNumber || c.number || parseAddress(addr).number || '',
-      city: c.city || area().city, uf: c.uf || area().uf, precision: coordinate.precision };
+      city: c.city || area().city, uf: c.uf || area().uf, precision: coordinate.precision,
+      road: c.road || parseAddress(addr).road, district: c.district || '',
+      propertyLat:coordinate.lat,propertyLon:coordinate.lon,locationChecked:false,accessConfirmed:false };
   }
   ui.form.addEventListener('submit', async event => {
     event.preventDefault();
@@ -431,7 +480,10 @@
       textStatus(wasEditing ? 'Endereço atualizado na lista.' : 'Entrega adicionada à lista.');
       if (coord.precision !== 'exata') showToast('Entrega salva com posição aproximada da rua.');
     } catch (error) {
-      textStatus(error.message || 'Não conseguimos localizar este endereço. Tente uma sugestão diferente.', true);
+      if (error.name === 'AbortError') textStatus('A busca foi interrompida. Tente novamente.', true);
+      else if (error.status || error instanceof TypeError)
+        textStatus('Não foi possível consultar a localização agora. Escolha uma sugestão com mapa ou tente novamente.', true);
+      else textStatus(error.message || 'Não conseguimos localizar este endereço. Tente outra sugestão.', true);
     } finally { setBusy(ui.add, false, ''); if (!editingId) ui.add.textContent = '＋ Adicionar entrega'; }
   });
 
@@ -506,7 +558,7 @@
     } else gpsMarker.setLngLat([gpsFix.lon,gpsFix.lat]);
     ui.gpsMessage.textContent = `◎ GPS ativo · precisão aproximada ±${Math.round(gpsFix.accuracy)} m`;
     const target = stops.find(p=>!p.concluida);
-    if (started && target && target.precision === 'exata' && gpsFix.accuracy <= 10 && meters(gpsFix,target) <= 10) {
+    if (started && target && target.accessConfirmed === true && gpsFix.accuracy <= 10 && meters(gpsFix,target) <= 10) {
       if (activeArrivalId !== target.id) {
         activeArrivalId = target.id;
         ui.arrived.textContent = 'Você chegou perto do destino. Confirme a entrega ao finalizar.';
@@ -567,6 +619,76 @@
     },()=>{ui.originStatus.textContent='GPS indisponível. Verifique a permissão.';},{enableHighAccuracy:true,timeout:15000});
   });
 
+  // ---- Inteligência de última milha (sem configuração para o motorista). ----
+  // OSM: procurar endereço com o número EXATO; OSRM: achar a via dirigível que
+  // corresponde ao logradouro. Se não houver dados, preservar a posição aproximada.
+  let overpassUnavailable = false;
+  async function lookupOSMHousesBatch(items) {
+    if (!items.length || overpassUnavailable) return [];
+    // Um único lote por clique evita sobrecarregar a instância pública Overpass.
+    const selectors = items.map(stop => {
+      const house=stop.number.replace(/[^0-9A-Za-z-]/g,'');
+      return `nwr(around:280,${stop.lat},${stop.lon})["addr:housenumber"="${house}"];`;
+    }).join('');
+    const q=`[out:json][timeout:6];(${selectors});out center tags;`;
+    try {
+      const response=await getJSONRemote(`${CFG.overpass}?data=${encodeURIComponent(q)}`,{timeout:6500});
+      return Array.isArray(response.elements) ? response.elements : [];
+    } catch(error) {
+      if ([429,403,503,504].includes(error.status)) overpassUnavailable=true;
+      console.warn('Base de imóveis temporariamente indisponível:',error);
+      return [];
+    }
+  }
+  function exactOSMHouseFor(stop,elements) {
+    const found=elements.filter(node =>
+      norm(node.tags?.['addr:housenumber'])===norm(stop.number) &&
+      normalizeRoad(node.tags?.['addr:street'])===normalizeRoad(stop.road))
+      .map(node=>({lat:Number(node.lat??node.center?.lat),lon:Number(node.lon??node.center?.lon)}))
+      .filter(validPoint)
+      .filter(point=>meters(point,stop)<=280)
+      .sort((a,b)=>meters(a,stop)-meters(b,stop));
+    return found[0]||null;
+  }
+  async function snapToNamedRoad(point,street) {
+    if (!validPoint(point)) return null;
+    try {
+      const url=`${CFG.osrm}/nearest/v1/driving/${point.lon},${point.lat}?number=8`;
+      const data=await getJSONRemote(url,{timeout:4200});
+      if (data.code!=='Ok' || !Array.isArray(data.waypoints)) return null;
+      // Sem conferir a rua, o ponto mais próximo poderia cair numa via paralela.
+      const matches=data.waypoints.filter(w => Array.isArray(w.location) &&
+        normalizeRoad(w.name)===normalizeRoad(street) && Number(w.distance)<=110)
+        .sort((a,b)=>a.distance-b.distance);
+      return matches.length ? {lat:matches[0].location[1],lon:matches[0].location[0]} : null;
+    } catch(error) { console.warn('Encaixe à rua indisponível:',error); return null; }
+  }
+  async function improvePendingLocations(list,snapshot) {
+    const eligible=list.filter(stop=>stop.number && stop.road && !stop.locationChecked)
+      .slice(0,CFG.maxAddressChecks);
+    if (!eligible.length) return;
+    const elements=await lookupOSMHousesBatch(eligible);
+    if (routeRevision!==snapshot) return;
+    const updated=await Promise.all(eligible.map(async stop=>{
+      const home=exactOSMHouseFor(stop,elements);
+      const base=home||{lat:stop.propertyLat??stop.lat,lon:stop.propertyLon??stop.lon};
+      const road=await snapToNamedRoad(base,stop.road);
+      return {stop, changes:{
+        ...(home?{propertyLat:home.lat,propertyLon:home.lon,precision:'exata'}:{}),
+        ...(road?{lat:road.lat,lon:road.lon}:{}),
+        // Elegível ao alerta de proximidade só se número identificado E rua correspondente.
+        // Isto NÃO comprova a entrada principal ou o local exato da fachada.
+        locationChecked:true, accessConfirmed:Boolean(road && (home || stop.precision==='exata'))
+      }};
+    }));
+    if (routeRevision!==snapshot) return;
+    for (const {stop,changes} of updated) {
+      const current=stops.find(s=>s.id===stop.id && s.endereco===stop.endereco);
+      if(current) Object.assign(current,changes);
+    }
+    save();drawAll();
+  }
+
   // ---- Route optimizer: road durations → nearest-neighbor + 2-opt; geographic fallback. ----
   function greedy(points, matrix) {
     const remaining = points.map((_,i)=>i+1);const result=[];let current=0;
@@ -624,6 +746,8 @@
     optimizing=true;setBusy(ui.optimize,true,'Otimizando...');ui.start.disabled=true;
     ui.heroNotice.textContent='Calculando a sequência das entregas...';
     try{
+      await improvePendingLocations(pending,snapshot);
+      if (snapshot!==routeRevision) return;
       const points=[origin,...pending];
       let matrix, matrixApproximate=false;
       try { matrix=points.length-1<=CFG.maxStopsForRoadMatrix ? await getRoadMatrix(points) : distanceMatrix(points);matrixApproximate=points.length-1>CFG.maxStopsForRoadMatrix; }
@@ -668,7 +792,7 @@
       const num=el('span','stop-index',String(index+1));
       const info=el('div','stop-info');
       info.append(el('strong',stop.concluida?'done':'',stop.endereco));
-      info.append(el('small','',`${stop.concluida?'Concluída':'Pendente'} · ${stop.precision==='exata'?'Localização do imóvel identificada':'Localização aproximada'}`));
+      info.append(el('small','',`${stop.concluida?'Concluída':'Pendente'} · ${stop.precision==='exata'?'Número localizado no mapa':'Localização aproximada'}`));
       const actions=el('div','stop-actions');
       const link=el('a','', '↗ Navegar');link.href=locationURL(stop);link.target='_blank';link.rel='noopener noreferrer';
       const mark=buildButton(stop.concluida?'↶ Desfazer':'✓ Entregue',()=>{
