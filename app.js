@@ -1,7 +1,8 @@
 let maplibregl = null; // O mapa é carregado de forma isolada: falhas da CDN não interrompem os cadastros.
 
 /**
- * RotaFácil V7 — autocompletar por rua, número preservado e confirmação rápida.
+ * RotaFácil V8 — sugestão preenche tudo e a entrega é adicionada diretamente.
+ * A edição permanece opcional na lista de paradas.
  * Serviços públicos são configurados aqui; o usuário final não precisa configurar nada.
  * Para operação comercial em escala, use serviços com contrato/servidor próprios.
  */
@@ -89,6 +90,9 @@ let idEmEdicao = null;
 const destinosAvisados = new Set();
 let debounceBusca = null, buscaController = null, buscaSequencia = 0;
 let sugestoesAtuais = [], sugestaoDestacada = -1, textoOriginalBusca = '', sugestaoSelecionada = null;
+// Guarda a sugestão escolhida. Alterar o campo descarta essa referência para evitar coordenadas antigas.
+let enderecoSelecionado = null;
+let cadastroEmCurso = false;
 let filaBusca = Promise.resolve(), ultimaChamadaPhoton = 0;
 let ultimoErroMapa = false;
 let revisaoVersao = 0, revisaoController = null, otimizacaoEmCurso = false;
@@ -380,10 +384,15 @@ async function sugestoesBusca(termo,signal) {
   // Fundamental: o número não é um termo de pesquisa de NOME DA RUA.
   // A sugestão de rua recebe o número digitado somente na interface, e a confirmação
   // tentará geocodificar a residência específica. Evita "Rua Votuporanga 264" → zero resultados.
-  const pesquisas = [
+  // Primeiro tenta achar o número digitado; se o serviço não conhecer o imóvel,
+  // busca a rua e mantém o número no texto exibido, sem fingir precisão de fachada.
+  const pesquisas = campos.numero ? [
+    [campos.rua, campos.numero, campos.bairro, campos.cidade].filter(Boolean).join(', '),
     [campos.rua, campos.cidade].filter(Boolean).join(', '),
-    campos.rua,
-    termo
+    campos.rua
+  ] : [
+    [campos.rua, campos.cidade].filter(Boolean).join(', '),
+    campos.rua
   ];
   let ordenados=[];
   let ultimoErro=null;
@@ -415,7 +424,7 @@ function mostrarSugestoes(termo,resultados) {
   fecharSugestoes(); sugestoesAtuais=resultados;
   if(!resultados.length) {
     const p=document.createElement('p');p.className='suggestion-empty';
-    p.textContent='Não encontramos sugestões. Use “Buscar” para conferir o endereço manualmente.';
+    p.textContent='Sem sugestões por enquanto. Confira a digitação e tente adicionar o endereço.';
     ui.sugestoes.append(p);
   } else resultados.forEach((d,i)=>{
     const b=document.createElement('button');b.type='button';b.className='suggestion';
@@ -430,12 +439,12 @@ function mostrarSugestoes(termo,resultados) {
     sub.textContent=[d.bairro||leitura.bairro,d.cidade||leitura.cidade,d.uf||leitura.uf].filter(Boolean).join(' · ');
     bloco.append(titulo,sub);
     if(numeroExibido && !mesmoNumero(d.numero,numeroExibido)) {
-      const em=document.createElement('em');em.textContent='Número digitado · confirmar localização';bloco.append(em);
+      const em=document.createElement('em');em.textContent='Número preservado · localização aproximada';bloco.append(em);
     } else if(numeroExibido) {
       const em=document.createElement('em');em.className='number-found';em.textContent='Número encontrado';bloco.append(em);
     }
     b.append(ico,bloco);
-    b.addEventListener('click',()=>{ textoOriginalBusca=termo; prepararRevisao(d); });
+    b.addEventListener('click',()=>selecionarSugestao(d,termo));
     ui.sugestoes.append(b);
   });
   ui.sugestoes.classList.remove('hidden'); ui.endereco.setAttribute('aria-expanded','true');
@@ -449,14 +458,16 @@ async function buscarSugestoes(termo) {
     const resultados=await sugestoesBusca(termo,buscaController.signal);
     if(seq!==buscaSequencia || termo!==ui.endereco.value.trim())return;
     mostrarSugestoes(termo,resultados);
-    if(resultados.length) aviso('Escolha o endereço da lista. O número que você digitou será mantido.');
+    if(resultados.length) aviso('Toque no endereço correto para preencher a entrega.');
   } catch(e) {
     if(e.name!=='AbortError' && seq===buscaSequencia) {
       fecharSugestoes(); aviso('A busca automática não respondeu. Você pode preencher o endereço manualmente.',true);
     }
   } finally { if(seq===buscaSequencia)ui.searchSpinner.classList.add('hidden'); }
 }
+// Uma sugestão preenchida só vale enquanto o usuário não editar o texto.
 ui.endereco.addEventListener('input',()=>{
+  enderecoSelecionado=null;
   cancelarBusca(); fecharSugestoes(); fecharRevisao();
   const termo=ui.endereco.value.trim();
   if(termo.length<4)return;
@@ -473,13 +484,111 @@ ui.endereco.addEventListener('keydown',e=>{
   else if(e.key==='Escape') fecharSugestoes();
 });
 document.addEventListener('click',e=>{if(!ui.endereco.closest('.search-area').contains(e.target))fecharSugestoes();});
-ui.form.addEventListener('submit',e=>{
-  e.preventDefault();const valor=ui.endereco.value.trim();if(valor.length<3)return;
-  textoOriginalBusca=valor;
-  // Busca é opcional: o usuário pode ir direto para conferência mesmo se o serviço falhar.
-  // Mesmo se não aparecer uma sugestão, o usuário pode revisar e salvar.
-  // Havendo sugestões, a mais adequada é usada apenas como referência da rua.
-  prepararRevisao(sugestoesAtuais[0]||null);
+
+// A experiência de cadastro não possui tela de revisão: selecionar preenche tudo;
+// clicar em "Adicionar entrega" salva e atualiza a lista de paradas.
+function selecionarSugestao(sugestao, textoDigitado) {
+  const digitado=interpretarEndereco(textoDigitado);
+  const campos={
+    rua:sugestao.rua||digitado.rua,
+    numero:digitado.numero||sugestao.numero||'',
+    bairro:sugestao.bairro||digitado.bairro||'',
+    cidade:sugestao.cidade||digitado.cidade||CONFIG.cidadePadrao,
+    uf:sugestao.uf||digitado.uf||CONFIG.ufPadrao,
+    cep:sugestao.cep||digitado.cep||''
+  };
+  const texto=enderecoCompleto(campos);
+  // Cancela respostas antigas antes de atualizar o input sem disparar evento input.
+  cancelarBusca();fecharSugestoes();fecharRevisao();
+  enderecoSelecionado={campos,ponto:sugestao,texto};
+  ui.endereco.value=texto;
+  aviso(campos.numero&&!mesmoNumero(campos.numero,sugestao.numero)
+    ? 'Endereço preenchido. Número mantido; posição aproximada. Clique em Adicionar entrega.'
+    : 'Endereço preenchido. Clique em Adicionar entrega.');
+  ui.btnAdicionar.focus();
+}
+
+function dadosDaSugestao(campos, ponto) {
+  if(!ponto || !coordenadasValidas(ponto) || !mesmaRua(ponto.rua,campos.rua)) return null;
+  // A posição do imóvel só é confirmada se a origem conhece o mesmo número.
+  const exato=Boolean(campos.numero && mesmoNumero(campos.numero,ponto.numero) &&
+    (!campos.cidade||!ponto.cidade||normalizar(campos.cidade)===normalizar(ponto.cidade)) &&
+    (!campos.uf||!ponto.uf||campos.uf===ponto.uf));
+  return {
+    lat:ponto.lat,lon:ponto.lon,precisao:exato?'confirmado':'aproximado',
+    acesso:{fonte:exato?'numero_geocodificado':'referencia_da_rua',
+      viaConfirmada:false,distanciaAteVia:null,
+      pontoImovel:{lat:ponto.lat,lon:ponto.lon}}
+  };
+}
+
+async function localizarDigitadoSemSugestao(texto,signal) {
+  const campos=interpretarEndereco(texto);
+  if(campos.rua.length<3) throw new Error('Digite pelo menos o nome da rua.');
+  // Apenas uma busca de endereço: não obriga o usuário a preencher campos extras.
+  const lista=await sugestoesBusca(texto,signal);
+  const melhor=lista[0];
+  if(!melhor) throw new Error('Não encontramos essa rua. Confira a cidade ou escolha uma sugestão.');
+  return {campos:{
+    rua:melhor.rua,
+    numero:campos.numero||melhor.numero||'',
+    bairro:melhor.bairro||campos.bairro||'',
+    cidade:melhor.cidade||campos.cidade||CONFIG.cidadePadrao,
+    uf:melhor.uf||campos.uf||CONFIG.ufPadrao,
+    cep:melhor.cep||campos.cep||''
+  },ponto:melhor};
+}
+
+function adicionarDiretamente(campos,local) {
+  const endereco=enderecoCompleto(campos);
+  paradas.push({
+    id:`${Date.now()}-${Math.random().toString(36).slice(2,8)}`,
+    endereco,lat:local.lat,lon:local.lon,precisao:local.precisao,
+    campos:{rua:campos.rua,numero:campos.numero,bairro:campos.bairro,
+      cidade:campos.cidade,uf:campos.uf,cep:campos.cep},
+    acesso:local.acesso,notas:'',urgente:false,tempoParada:0,concluida:false
+  });
+  enderecoSelecionado=null;
+  textoOriginalBusca='';
+  ui.endereco.value='';
+  cancelarBusca();fecharSugestoes();fecharRevisao();
+  invalidarPlano();renderizar();
+  aviso(local.precisao==='aproximado'
+    ? 'Entrega adicionada! Número mantido, localização aproximada da rua.'
+    : 'Entrega adicionada! Pode cadastrar o próximo endereço.');
+  ui.endereco.focus();
+}
+
+ui.form.addEventListener('submit',async e=>{
+  e.preventDefault();
+  if(cadastroEmCurso)return;
+  const texto=ui.endereco.value.trim();
+  if(texto.length<3)return;
+  cadastroEmCurso=true;
+  cancelarBusca();fecharSugestoes();
+  busy(ui.btnAdicionar,true,'Adicionando...');
+  try {
+    let selecionado=enderecoSelecionado&&enderecoSelecionado.texto===texto
+      ? enderecoSelecionado:null;
+    if(!selecionado) {
+      aviso('Localizando o endereço...');
+      const controlador=new AbortController();
+      const t=setTimeout(()=>controlador.abort(),8000);
+      try {
+        const localizado=await localizarDigitadoSemSugestao(texto,controlador.signal);
+        selecionado={...localizado,texto};
+      } finally {clearTimeout(t);}
+    }
+    const local=dadosDaSugestao(selecionado.campos,selecionado.ponto);
+    if(!local) throw new Error('Localização inválida. Selecione outro endereço da lista.');
+    // Sem consultas adicionais: a seleção já contém coordenadas suficientes para cadastrar.
+    adicionarDiretamente(selecionado.campos,local);
+  } catch (erro) {
+    console.warn('Cadastro de endereço:',erro);
+    aviso(erro.name==='AbortError'
+      ? 'A busca demorou. Escolha uma sugestão ou tente novamente.'
+      : (erro.message||'Não foi possível encontrar esse endereço.'),true);
+  } finally {cadastroEmCurso=false;busy(ui.btnAdicionar,false);}
 });
 
 function precisão(tipo,msg) {
@@ -498,6 +607,7 @@ function fecharRevisao() {
   sugestaoSelecionada=null;
 }
 function prepararRevisao(sugestao=null, paradaExistente=null) {
+  enderecoSelecionado=null;
   cancelarBusca();fecharSugestoes();fecharRevisao();
   sugestaoSelecionada=sugestao || (paradaExistente?.campos ? {
     ...paradaExistente.campos,lat:paradaExistente.lat,lon:paradaExistente.lon,
@@ -522,15 +632,15 @@ function prepararRevisao(sugestao=null, paradaExistente=null) {
   ui.revisao.classList.remove('hidden');
   ui.endereco.value=enderecoCompleto(dado);
   precisão('normal', idEmEdicao ? 'Confira o número e confirme a nova localização.'
-    : 'O número foi mantido. Confira os dados e toque em OK para adicionar a parada.');
+    : 'Corrija os dados e salve a alteração.');
   ui.reviewNotas.value=paradaExistente?.notas||'';
   ui.reviewPrioridade.checked=Boolean(paradaExistente?.urgente);
   ui.reviewTempo.value=String(paradaExistente?.tempoParada||0);
-  ui.btnConfirmar.innerHTML=`<i class="fa-solid fa-check"></i> ${idEmEdicao?'Salvar alteração':'OK, confirmar'}`;
+  ui.btnConfirmar.innerHTML=`<i class="fa-solid fa-check"></i> ${idEmEdicao?'Salvar alterações':'Salvar alterações'}`;
   ui.revisao.scrollIntoView({behavior:'smooth',block:'nearest'});
   if(sugestao&&mapPronto&&mapa) mapa.flyTo({center:[sugestao.lon,sugestao.lat],zoom:16,duration:450});
 }
-// Ao confirmar, buscamos NOVAMENTE, inclusive se o número foi editado.
+// Ao editar uma parada existente, buscamos novamente sua localização.
 async function geocodificarRevisado(campos, signal, referencia = null) {
   // 1) Busca a casa exata (quando cadastrada na base). Respostas sem número NUNCA são chamadas de exatas.
   let resultados=[];

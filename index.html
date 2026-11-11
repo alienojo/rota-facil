@@ -96,20 +96,20 @@
       </section>
 
       <section class="page-section" id="nova-entrega" aria-labelledby="titulo-endereco">
-        <div class="section-heading"><div><span class="eyebrow">02 / PARADAS</span><h2 id="titulo-endereco">Adicionar uma entrega</h2></div><span class="section-helper">Pesquise → confirme → adicione</span></div>
+        <div class="section-heading"><div><span class="eyebrow">02 / PARADAS</span><h2 id="titulo-endereco">Adicionar uma entrega</h2></div><span class="section-helper">Digite → selecione → adicione</span></div>
         <div class="surface address-surface">
-          <div class="surface-header"><span class="circle-icon"><i class="fa-solid fa-map-pin"></i></span><div><h3>Para onde você vai?</h3><p>Digite rua e número. Escolha uma sugestão e toque em OK para adicionar.</p></div></div>
+          <div class="surface-header"><span class="circle-icon"><i class="fa-solid fa-map-pin"></i></span><div><h3>Para onde você vai?</h3><p>Digite a rua e o número, escolha uma sugestão e adicione direto à sua lista.</p></div></div>
           <form id="form-parada" autocomplete="off">
             <label for="input-endereco" class="field-label">ENDEREÇO DA ENTREGA</label>
             <div class="search-row"><div class="search-area"><i class="fa-solid fa-magnifying-glass search-icon"></i><input id="input-endereco" type="text" required minlength="3" autocomplete="off" role="combobox" aria-controls="sugestoes-endereco" aria-expanded="false" aria-autocomplete="list" placeholder="Ex.: Rua Votuporanga 264"><span id="search-spinner" class="search-spinner hidden"><i class="fa-solid fa-spinner fa-spin"></i></span><div id="sugestoes-endereco" class="suggestions hidden" role="listbox" aria-label="Sugestões de endereços"></div></div>
-              <button id="btn-adicionar" class="btn btn-dark" type="submit"><i class="fa-solid fa-arrow-right"></i> Conferir</button>
+              <button id="btn-adicionar" class="btn btn-dark" type="submit"><i class="fa-solid fa-plus"></i> Adicionar entrega</button>
               <button id="btn-camera" class="btn btn-soft" type="button" title="Ler endereço de fotografia"><i class="fa-solid fa-camera"></i> Foto</button>
               <input id="input-file-camera" type="file" accept="image/*" capture="environment" class="hidden">
             </div>
-            <p id="status-formulario" class="form-message" role="status" aria-live="polite">As sugestões incluem o número que você digitar. Selecione uma e confirme.</p>
+            <p id="status-formulario" class="form-message" role="status" aria-live="polite">Selecione um endereço da lista para preencher tudo automaticamente.</p>
           </form>
-          <div id="revisao-endereco" class="review-panel hidden" aria-label="Revisar endereço selecionado">
-            <div class="review-heading"><div><span class="eyebrow">CONFIRA O ENDEREÇO</span><h3>Está tudo certo?</h3><p>O número foi preservado. Corrija algum campo se necessário e confirme.</p></div><button id="btn-fechar-revisao" class="icon-btn" type="button" title="Cancelar" aria-label="Cancelar"><i class="fa-solid fa-xmark"></i></button></div>
+          <div id="revisao-endereco" class="review-panel hidden" aria-label="Editar entrega cadastrada">
+            <div class="review-heading"><div><span class="eyebrow">EDIÇÃO OPCIONAL</span><h3>Editar entrega</h3><p>Corrija o endereço e salve as alterações.</p></div><button id="btn-fechar-revisao" class="icon-btn" type="button" title="Cancelar" aria-label="Cancelar"><i class="fa-solid fa-xmark"></i></button></div>
             <form id="form-revisao" autocomplete="off">
               <div class="review-fields">
                 <label class="street-col">Rua / avenida<input id="review-rua" required placeholder="Nome da rua"></label>
@@ -128,7 +128,7 @@
                 </div>
               </details>
               <div id="resultado-precisao" class="accuracy-message" role="status" aria-live="polite"><i class="fa-solid fa-circle-info"></i><span>Confira os campos para continuar.</span></div>
-              <div class="review-actions"><button id="btn-confirmar-endereco" class="btn btn-lime" type="submit"><i class="fa-solid fa-check"></i> OK, confirmar</button><button id="btn-editar-endereco" class="btn btn-soft" type="button"><i class="fa-solid fa-pen"></i> Editar</button></div>
+              <div class="review-actions"><button id="btn-confirmar-endereco" class="btn btn-lime" type="submit"><i class="fa-solid fa-check"></i> Salvar alterações</button><button id="btn-editar-endereco" class="btn btn-soft" type="button"><i class="fa-solid fa-pen"></i> Editar</button></div>
 
             </form>
           </div>
