@@ -1,21 +1,645 @@
-body {
-    font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
-}
+(() => {
+    "use strict";
 
-.parada-card {
-    transition: all 0.2s ease;
-}
+    // Configurações centrais: altere aqui a cidade padrão e os serviços usados.
+    const CONFIG = {
+        origemPadrao: {
+            endereco: "São José dos Campos, SP",
+            lat: -23.1794,
+            lon: -45.8869,
+            personalizado: false
+        },
+        nominatim: "https://nominatim.openstreetmap.org",
+        osrm: "https://router.project-osrm.org",
+        atrasoBuscaMs: 800,
+        maxParadasRota: 80
+    };
 
-.parada-card.concluida {
-    opacity: 0.5;
-    border-color: rgba(16, 185, 129, 0.3);
-    background-color: rgba(15, 23, 42, 0.6);
-}
+    const $ = (id) => document.getElementById(id);
+    const el = {
+        form: $("form-parada"),
+        inputEndereco: $("input-endereco"),
+        sugestoes: $("sugestoes-container"),
+        lista: $("lista-entregas"),
+        contador: $("contador-paradas"),
+        btnLimpar: $("btn-limpar"),
+        btnOtimizar: $("btn-otimizar"),
+        btnComecar: $("btn-comecar-rota"),
+        btnResetar: $("btn-resetar-rota"),
+        btnCamera: $("btn-camera"),
+        inputCamera: $("input-file-camera"),
+        inputOrigem: $("input-origem"),
+        btnGps: $("btn-gps-atual"),
+        btnSalvarOrigem: $("btn-salvar-origem"),
+        labelOrigem: $("label-status-origem"),
+        ajudaOrigem: $("ajuda-origem"),
+        painelProxima: $("painel-bola-da-vez"),
+        numeroProxima: $("numero-bola-da-vez"),
+        enderecoProxima: $("endereco-bola-da-vez"),
+        btnNavegar: $("btn-navegar-ativa"),
+        btnConcluir: $("btn-concluir-ativa"),
+        statusMapa: $("status-mapa"),
+        progresso: $("progresso-rota"),
+        statusFormulario: $("status-formulario"),
+        resumo: $("resumo-entregas"),
+        loadingMapa: $("map-loading"),
+        btnAjustarMapa: $("btn-ajustar-mapa")
+    };
 
-/* Customização dos popups do mapa */
-.leaflet-popup-content-wrapper, .leaflet-popup-tip {
-    background-color: #1e293b !important;
-    color: #f8fafc !important;
-    border: 1px solid #334155;
-    border-radius: 12px;
-}
+    const STORAGE_KEYS = {
+        paradas: "rotafacil_paradas",
+        origem: "rotafacil_origem",
+        iniciada: "rotafacil_iniciada"
+    };
+
+    function lerStorage(chave, padrao) {
+        try {
+            const valor = localStorage.getItem(chave);
+            return valor === null ? padrao : JSON.parse(valor);
+        } catch (erro) {
+            console.warn(`Não foi possível ler ${chave}:`, erro);
+            return padrao;
+        }
+    }
+
+    let origem = validarOrigem(lerStorage(STORAGE_KEYS.origem, CONFIG.origemPadrao));
+    let paradas = validarParadas(lerStorage(STORAGE_KEYS.paradas, []));
+    let rotaIniciada = Boolean(lerStorage(STORAGE_KEYS.iniciada, false));
+    let coordenadaSelecionada = null;
+    let timerBusca = null;
+    let controladorBusca = null;
+    let controladorRota = null;
+    let ultimaBuscaNominatim = 0;
+    let workerOCR = null;
+    let proximaId = Date.now();
+
+    function validarOrigem(valor) {
+        if (!valor || !Number.isFinite(Number(valor.lat)) || !Number.isFinite(Number(valor.lon))) {
+            return { ...CONFIG.origemPadrao };
+        }
+        return {
+            endereco: String(valor.endereco || CONFIG.origemPadrao.endereco),
+            lat: Number(valor.lat),
+            lon: Number(valor.lon),
+            personalizado: Boolean(valor.personalizado)
+        };
+    }
+
+    function validarParadas(valor) {
+        if (!Array.isArray(valor)) return [];
+        return valor.filter(p =>
+            p && Number.isFinite(Number(p.lat)) && Number.isFinite(Number(p.lon)) &&
+            typeof p.endereco === "string"
+        ).map(p => ({
+            id: p.id ?? `${Date.now()}-${Math.random()}`,
+            endereco: p.endereco,
+            lat: Number(p.lat),
+            lon: Number(p.lon),
+            concluida: Boolean(p.concluida)
+        }));
+    }
+
+    function salvarEstado() {
+        try {
+            localStorage.setItem(STORAGE_KEYS.paradas, JSON.stringify(paradas));
+            localStorage.setItem(STORAGE_KEYS.origem, JSON.stringify(origem));
+            localStorage.setItem(STORAGE_KEYS.iniciada, JSON.stringify(rotaIniciada));
+        } catch (erro) {
+            console.error("Falha ao salvar os dados:", erro);
+            mostrarStatus("Não foi possível salvar. Verifique o espaço disponível no navegador.", "erro");
+        }
+    }
+
+    function mostrarStatus(mensagem, tipo = "normal") {
+        el.statusFormulario.textContent = mensagem;
+        el.statusFormulario.className = `min-h-4 text-xs ${tipo === "erro" ? "text-rose-300" : tipo === "sucesso" ? "text-emerald-300" : "text-slate-400"}`;
+    }
+
+    function setBotaoCarregando(botao, carregando, textoNormal, textoCarregando) {
+        botao.disabled = carregando;
+        botao.innerHTML = carregando
+            ? `<i class="fa-solid fa-spinner fa-spin"></i> ${textoCarregando}`
+            : textoNormal;
+    }
+
+    // Mapa
+    const map = L.map("map", { zoomControl: true }).setView([origem.lat, origem.lon], 13);
+    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+        maxZoom: 19,
+        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">OpenStreetMap</a>'
+    }).addTo(map);
+
+    const markersLayer = L.layerGroup().addTo(map);
+    let routeLayer = L.layerGroup().addTo(map);
+    let rotaRequestId = 0;
+
+    function criarIcone(texto, cor, tamanho = 30) {
+        return L.divIcon({
+            className: "rota-marker",
+            html: `<div style="width:${tamanho}px;height:${tamanho}px;border-radius:50%;display:flex;align-items:center;justify-content:center;background:${cor};color:white;border:2px solid white;font-weight:800;font-size:12px;box-shadow:0 3px 10px #0008">${texto}</div>`,
+            iconSize: [tamanho, tamanho],
+            iconAnchor: [tamanho / 2, tamanho / 2]
+        });
+    }
+
+    function enquadrarMapa() {
+        const pontos = [[origem.lat, origem.lon], ...paradas.map(p => [p.lat, p.lon])];
+        if (pontos.length === 1) map.setView(pontos[0], 14);
+        else map.fitBounds(pontos, { padding: [35, 35], maxZoom: 16 });
+    }
+
+    async function atualizarMapa() {
+        const requestId = ++rotaRequestId;
+        markersLayer.clearLayers();
+        routeLayer.clearLayers();
+
+        L.marker([origem.lat, origem.lon], { icon: criarIcone('<i class="fa-solid fa-house"></i>', "#2563eb", 34) })
+            .bindPopup(`<strong>Origem</strong><br>${escapeHtml(origem.endereco)}`)
+            .addTo(markersLayer);
+
+        const proxima = paradas.find(p => !p.concluida);
+        paradas.forEach((p, index) => {
+            const ativa = rotaIniciada && proxima?.id === p.id;
+            L.marker([p.lat, p.lon], {
+                icon: criarIcone(String(index + 1), p.concluida ? "#64748b" : ativa ? "#e11d48" : "#059669", ativa ? 36 : 30)
+            }).bindPopup(`<strong>Parada ${index + 1}</strong><br>${escapeHtml(p.endereco)}<br>${p.concluida ? "Concluída" : "Pendente"}`)
+              .addTo(markersLayer);
+        });
+
+        enquadrarMapa();
+        if (!paradas.length) {
+            el.statusMapa.textContent = "Adicione paradas para visualizar o percurso";
+            return;
+        }
+
+        el.loadingMapa.classList.remove("hidden");
+        el.statusMapa.textContent = "Calculando percurso pelas ruas...";
+        const pontos = [[origem.lon, origem.lat], ...paradas.map(p => [p.lon, p.lat])];
+        const coords = pontos.map(p => `${p[0]},${p[1]}`).join(";");
+        const url = `${CONFIG.osrm}/route/v1/driving/${coords}?overview=full&geometries=geojson&steps=false`;
+
+        try {
+            const response = await fetch(url);
+            if (!response.ok) throw new Error(`OSRM respondeu ${response.status}`);
+            const data = await response.json();
+            if (requestId !== rotaRequestId) return;
+            if (data.code !== "Ok" || !data.routes?.length) throw new Error("Percurso não encontrado");
+
+            const routeCoordinates = data.routes[0].geometry.coordinates.map(([lon, lat]) => [lat, lon]);
+            L.polyline(routeCoordinates, { color: "#10b981", weight: 5, opacity: .85 }).addTo(routeLayer);
+            const km = (data.routes[0].distance / 1000).toFixed(1).replace(".", ",");
+            const minutos = Math.round(data.routes[0].duration / 60);
+            el.statusMapa.textContent = `Percurso aproximado: ${km} km · ${minutos} min`;
+        } catch (erro) {
+            if (requestId === rotaRequestId) {
+                console.warn("Não foi possível traçar a rota:", erro);
+                el.statusMapa.textContent = "Não foi possível calcular o trajeto pelas ruas agora.";
+            }
+        } finally {
+            if (requestId === rotaRequestId) el.loadingMapa.classList.add("hidden");
+        }
+    }
+
+    function escapeHtml(valor) {
+        return String(valor).replace(/[&<>"']/g, caractere => ({
+            "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+        })[caractere]);
+    }
+
+    function urlNavegacao(parada) {
+        return `https://www.google.com/maps/dir/?api=1&destination=${parada.lat},${parada.lon}&travelmode=driving`;
+    }
+
+    function renderizar() {
+        const concluidas = paradas.filter(p => p.concluida).length;
+        const pendentes = paradas.length - concluidas;
+        el.contador.textContent = `${paradas.length} ${paradas.length === 1 ? "parada" : "paradas"}`;
+        el.resumo.textContent = paradas.length
+            ? `${pendentes} pendente(s) · ${concluidas} concluída(s)`
+            : "Nenhuma parada cadastrada";
+
+        el.lista.replaceChildren();
+        if (!paradas.length) {
+            const vazio = document.createElement("div");
+            vazio.className = "empty-state";
+            vazio.textContent = "Nenhuma parada na rota. Adicione seu primeiro endereço acima.";
+            el.lista.appendChild(vazio);
+        } else {
+            const proxima = paradas.find(p => !p.concluida);
+            paradas.forEach((p, index) => {
+                const ativa = rotaIniciada && proxima?.id === p.id;
+                const card = document.createElement("article");
+                card.className = `parada-card ${p.concluida ? "concluida" : ""} ${ativa ? "ativa" : ""}`;
+
+                const topo = document.createElement("div");
+                topo.className = "flex items-start justify-between gap-3";
+                const info = document.createElement("div");
+                info.className = "flex min-w-0 items-start gap-3";
+                const numero = document.createElement("span");
+                numero.className = `flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-xs font-extrabold ${ativa ? "bg-emerald-400 text-slate-950" : "bg-slate-700 text-emerald-300"}`;
+                numero.textContent = String(index + 1);
+                const endereco = document.createElement("p");
+                endereco.className = `break-words pt-1 text-sm font-semibold ${p.concluida ? "line-through text-slate-400" : "text-slate-100"}`;
+                endereco.textContent = p.endereco;
+                info.append(numero, endereco);
+
+                const excluir = document.createElement("button");
+                excluir.type = "button";
+                excluir.className = "rounded-lg p-2 text-slate-400 transition hover:bg-rose-500/10 hover:text-rose-300";
+                excluir.title = "Excluir parada";
+                excluir.setAttribute("aria-label", `Excluir parada ${index + 1}`);
+                excluir.innerHTML = '<i class="fa-solid fa-trash-can"></i>';
+                excluir.addEventListener("click", () => excluirParada(p.id));
+                topo.append(info, excluir);
+
+                const acoes = document.createElement("div");
+                acoes.className = "mt-3 flex gap-2 border-t border-slate-700/70 pt-3";
+                const navegar = document.createElement("a");
+                navegar.href = urlNavegacao(p);
+                navegar.target = "_blank";
+                navegar.rel = "noopener noreferrer";
+                navegar.className = "secondary-button flex-1";
+                navegar.innerHTML = '<i class="fa-solid fa-location-arrow"></i> Navegar';
+                const concluir = document.createElement("button");
+                concluir.type = "button";
+                concluir.className = p.concluida ? "secondary-button flex-1" : "primary-button flex-1";
+                concluir.innerHTML = p.concluida
+                    ? '<i class="fa-solid fa-rotate-left"></i> Desfazer'
+                    : '<i class="fa-solid fa-check"></i> Entregue';
+                concluir.addEventListener("click", () => alternarConcluida(p.id));
+                acoes.append(navegar, concluir);
+                card.append(topo, acoes);
+                el.lista.appendChild(card);
+            });
+        }
+
+        atualizarPainelProxima();
+        salvarEstado();
+        atualizarMapa();
+    }
+
+    function atualizarPainelProxima() {
+        const pendentes = paradas.filter(p => !p.concluida);
+        if (!rotaIniciada || !pendentes.length) {
+            el.painelProxima.classList.add("hidden");
+            return;
+        }
+
+        const proxima = pendentes[0];
+        const numero = paradas.findIndex(p => p.id === proxima.id) + 1;
+        const concluidas = paradas.length - pendentes.length;
+        el.painelProxima.classList.remove("hidden");
+        el.numeroProxima.textContent = String(numero);
+        el.enderecoProxima.textContent = proxima.endereco;
+        el.btnNavegar.href = urlNavegacao(proxima);
+        el.progresso.textContent = `${concluidas} de ${paradas.length} concluídas`;
+        el.btnConcluir.onclick = () => alternarConcluida(proxima.id);
+    }
+
+    // Nominatim: debounce, cache local e intervalo mínimo para reduzir requisições.
+    const cacheGeocodificacao = new Map();
+    async function consultarNominatim(url, signal) {
+        const agora = Date.now();
+        const espera = Math.max(0, 1000 - (agora - ultimaBuscaNominatim));
+        if (espera) await new Promise(resolve => setTimeout(resolve, espera));
+        ultimaBuscaNominatim = Date.now();
+        const response = await fetch(url, { signal, headers: { "Accept": "application/json" } });
+        if (!response.ok) throw new Error(`Serviço de endereço respondeu ${response.status}`);
+        return response.json();
+    }
+
+    function formatarSugestao(item) {
+        const a = item.address || {};
+        const rua = a.road || a.pedestrian || a.residential || a.suburb || item.display_name.split(",")[0];
+        const bairro = a.suburb || a.neighbourhood || a.city_district || a.quarter || "";
+        const cidade = a.city || a.town || a.municipality || a.village || "";
+        const partes = [rua, bairro, cidade, a.postcode].filter(Boolean);
+        return [...new Set(partes)].join(" — ");
+    }
+
+    async function buscarSugestoes(termo) {
+        if (controladorBusca) controladorBusca.abort();
+        controladorBusca = new AbortController();
+        const url = `${CONFIG.nominatim}/search?format=json&addressdetails=1&limit=6&countrycodes=br&q=${encodeURIComponent(termo)}`;
+        try {
+            const resultados = await consultarNominatim(url, controladorBusca.signal);
+            el.sugestoes.replaceChildren();
+            if (!resultados.length) {
+                esconderSugestoes();
+                return;
+            }
+            resultados.forEach(item => {
+                const botao = document.createElement("button");
+                botao.type = "button";
+                botao.className = "suggestion-item";
+                botao.textContent = formatarSugestao(item) || item.display_name;
+                botao.addEventListener("click", () => {
+                    el.inputEndereco.value = botao.textContent;
+                    coordenadaSelecionada = { lat: Number(item.lat), lon: Number(item.lon) };
+                    esconderSugestoes();
+                    el.inputEndereco.focus();
+                });
+                el.sugestoes.appendChild(botao);
+            });
+            el.sugestoes.classList.remove("hidden");
+        } catch (erro) {
+            if (erro.name !== "AbortError") console.warn("Busca de endereço:", erro);
+        }
+    }
+
+    function esconderSugestoes() {
+        el.sugestoes.classList.add("hidden");
+        el.sugestoes.replaceChildren();
+    }
+
+    async function geocodificar(endereco) {
+        const chave = endereco.toLocaleLowerCase("pt-BR");
+        if (cacheGeocodificacao.has(chave)) return cacheGeocodificacao.get(chave);
+
+        const url = `${CONFIG.nominatim}/search?format=json&limit=1&countrycodes=br&q=${encodeURIComponent(endereco)}`;
+        const resultados = await consultarNominatim(url);
+        if (!resultados.length) throw new Error("Endereço não encontrado. Confira o texto ou escolha uma sugestão.");
+        const coords = { lat: Number(resultados[0].lat), lon: Number(resultados[0].lon) };
+        cacheGeocodificacao.set(chave, coords);
+        return coords;
+    }
+
+    el.inputEndereco.addEventListener("input", () => {
+        const termo = el.inputEndereco.value.trim();
+        coordenadaSelecionada = null;
+        clearTimeout(timerBusca);
+        if (termo.length < 4) {
+            esconderSugestoes();
+            return;
+        }
+        timerBusca = setTimeout(() => buscarSugestoes(termo), CONFIG.atrasoBuscaMs);
+    });
+
+    document.addEventListener("click", evento => {
+        if (!el.form.contains(evento.target)) esconderSugestoes();
+    });
+
+    el.form.addEventListener("submit", async evento => {
+        evento.preventDefault();
+        const endereco = el.inputEndereco.value.trim();
+        if (endereco.length < 4) return;
+
+        const textoOriginal = el.btnAdicionar.innerHTML;
+        setBotaoCarregando(el.btnAdicionar, true, textoOriginal, "Localizando...");
+        mostrarStatus("Localizando o endereço...", "normal");
+        try {
+            const coords = coordenadaSelecionada || await geocodificar(endereco);
+            paradas.push({
+                id: `${Date.now()}-${proximaId++}`,
+                endereco,
+                lat: coords.lat,
+                lon: coords.lon,
+                concluida: false
+            });
+            el.inputEndereco.value = "";
+            coordenadaSelecionada = null;
+            esconderSugestoes();
+            mostrarStatus("Parada adicionada com sucesso.", "sucesso");
+            renderizar();
+        } catch (erro) {
+            mostrarStatus(erro.message || "Não foi possível localizar esse endereço.", "erro");
+        } finally {
+            setBotaoCarregando(el.btnAdicionar, false, textoOriginal, "");
+        }
+    });
+
+    // Origem digitada: só é salva quando o serviço retorna coordenadas válidas.
+    async function definirOrigemPorTexto() {
+        const texto = el.inputOrigem.value.trim();
+        if (!texto) {
+            mostrarStatus("Digite um endereço para definir a origem.", "erro");
+            return;
+        }
+        const textoOriginal = el.btnSalvarOrigem.innerHTML;
+        setBotaoCarregando(el.btnSalvarOrigem, true, textoOriginal, "Buscando...");
+        try {
+            const coords = await geocodificar(texto);
+            origem = { endereco: texto, ...coords, personalizado: true };
+            el.labelOrigem.textContent = "Origem definida";
+            el.ajudaOrigem.textContent = "A origem personalizada será usada na próxima otimização e no mapa.";
+            renderizar();
+            mostrarStatus("Ponto de partida atualizado.", "sucesso");
+        } catch (erro) {
+            mostrarStatus(erro.message || "Não encontramos esse ponto de partida.", "erro");
+        } finally {
+            setBotaoCarregando(el.btnSalvarOrigem, false, textoOriginal, "");
+        }
+    }
+
+    el.btnSalvarOrigem.addEventListener("click", definirOrigemPorTexto);
+    el.inputOrigem.addEventListener("keydown", evento => {
+        if (evento.key === "Enter") {
+            evento.preventDefault();
+            definirOrigemPorTexto();
+        }
+    });
+
+    el.btnGps.addEventListener("click", () => {
+        if (!navigator.geolocation) {
+            mostrarStatus("Seu navegador não oferece suporte à localização.", "erro");
+            return;
+        }
+        const original = el.btnGps.innerHTML;
+        setBotaoCarregando(el.btnGps, true, original, "Obtendo GPS...");
+        navigator.geolocation.getCurrentPosition(async posicao => {
+            const coords = { lat: posicao.coords.latitude, lon: posicao.coords.longitude };
+            let nome = "Minha localização atual";
+            try {
+                const url = `${CONFIG.nominatim}/reverse?format=json&lat=${coords.lat}&lon=${coords.lon}`;
+                const dado = await consultarNominatim(url);
+                if (dado.display_name) nome = dado.display_name.split(",").slice(0, 3).join(", ");
+            } catch (erro) {
+                console.warn("Não foi possível obter o nome do endereço GPS:", erro);
+            }
+            origem = { endereco: nome, ...coords, personalizado: true };
+            el.inputOrigem.value = nome;
+            el.labelOrigem.textContent = "GPS ativo";
+            el.ajudaOrigem.textContent = "A localização atual foi definida como ponto de partida.";
+            setBotaoCarregando(el.btnGps, false, original, "");
+            renderizar();
+            mostrarStatus("Ponto de partida definido pela localização atual.", "sucesso");
+        }, erro => {
+            setBotaoCarregando(el.btnGps, false, original, "");
+            const mensagens = {
+                1: "Permissão de localização negada. Libere o GPS no navegador.",
+                2: "A localização não está disponível neste momento.",
+                3: "A solicitação de GPS expirou. Tente novamente."
+            };
+            mostrarStatus(mensagens[erro.code] || "Não foi possível obter sua localização.", "erro");
+        }, { enableHighAccuracy: true, timeout: 15000, maximumAge: 30000 });
+    });
+
+    // Otimização: matriz de distâncias rodoviárias do OSRM Table.
+    // Para rotas grandes ou indisponibilidade do serviço, usa distância geográfica como alternativa.
+    function distanciaEmLinhaReta(a, b) {
+        const rad = graus => graus * Math.PI / 180;
+        const dLat = rad(b.lat - a.lat);
+        const dLon = rad(b.lon - a.lon);
+        const lat1 = rad(a.lat);
+        const lat2 = rad(b.lat);
+        const h = Math.sin(dLat / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLon / 2) ** 2;
+        return 6371000 * 2 * Math.atan2(Math.sqrt(h), Math.sqrt(1 - h));
+    }
+
+    function ordenarPorMatriz(pontos, matriz) {
+        const restantes = pontos.map((_, i) => i + 1);
+        const ordem = [];
+        let atual = 0; // índice zero representa a origem
+        while (restantes.length) {
+            let melhorPosicao = 0;
+            let menor = Infinity;
+            restantes.forEach((indice, posicao) => {
+                const distancia = matriz[atual]?.[indice];
+                if (Number.isFinite(distancia) && distancia < menor) {
+                    menor = distancia;
+                    melhorPosicao = posicao;
+                }
+            });
+            const [escolhido] = restantes.splice(melhorPosicao, 1);
+            ordem.push(pontos[escolhido - 1]);
+            atual = escolhido;
+        }
+        return ordem;
+    }
+
+    el.btnOtimizar.addEventListener("click", async () => {
+        const pendentes = paradas.filter(p => !p.concluida);
+        if (!pendentes.length) {
+            mostrarStatus("Adicione pelo menos uma parada pendente para otimizar.", "erro");
+            return;
+        }
+        if (pendentes.length > CONFIG.maxParadasRota) {
+            mostrarStatus(`A otimização por ruas está limitada a ${CONFIG.maxParadasRota} paradas por vez.`, "erro");
+            return;
+        }
+
+        const original = el.btnOtimizar.innerHTML;
+        setBotaoCarregando(el.btnOtimizar, true, original, "Calculando...");
+        try {
+            const pontos = [origem, ...pendentes];
+            const coords = pontos.map(p => `${p.lon},${p.lat}`).join(";");
+            const url = `${CONFIG.osrm}/table/v1/driving/${coords}?annotations=distance`;
+            let ordenadas;
+
+            const response = await fetch(url);
+            if (!response.ok) throw new Error("Serviço de otimização indisponível");
+            const data = await response.json();
+            if (data.code !== "Ok" || !data.distances) throw new Error("Matriz de distâncias indisponível");
+            ordenadas = ordenarPorMatriz(pendentes, data.distances);
+
+            // Mantém as entregas já concluídas no histórico e reorganiza somente as pendentes.
+            let indicePendente = 0;
+            paradas = paradas.map(p => p.concluida ? p : ordenadas[indicePendente++]);
+            mostrarStatus("Rota reorganizada considerando as distâncias pelas ruas.", "sucesso");
+        } catch (erro) {
+            console.warn("Otimização rodoviária indisponível; usando distância geográfica:", erro);
+            let atual = { lat: origem.lat, lon: origem.lon };
+            const restantes = [...pendentes];
+            const ordenadas = [];
+            while (restantes.length) {
+                let indice = 0;
+                let menor = Infinity;
+                restantes.forEach((p, i) => {
+                    const d = distanciaEmLinhaReta(atual, p);
+                    if (d < menor) { menor = d; indice = i; }
+                });
+                const [proxima] = restantes.splice(indice, 1);
+                ordenadas.push(proxima);
+                atual = proxima;
+            }
+            let indicePendente = 0;
+            paradas = paradas.map(p => p.concluida ? p : ordenadas[indicePendente++]);
+            mostrarStatus("Rota otimizada por proximidade geográfica (modo alternativo).", "sucesso");
+        } finally {
+            setBotaoCarregando(el.btnOtimizar, false, original, "");
+            renderizar();
+        }
+    });
+
+    function alternarConcluida(id) {
+        paradas = paradas.map(p => p.id === id ? { ...p, concluida: !p.concluida } : p);
+        renderizar();
+    }
+
+    function excluirParada(id) {
+        paradas = paradas.filter(p => p.id !== id);
+        renderizar();
+        mostrarStatus("Parada removida.", "sucesso");
+    }
+
+    el.btnComecar.addEventListener("click", () => {
+        if (!paradas.length) {
+            mostrarStatus("Adicione pelo menos uma entrega antes de iniciar a rota.", "erro");
+            return;
+        }
+        rotaIniciada = true;
+        renderizar();
+        mostrarStatus("Rota iniciada. A próxima entrega está destacada.", "sucesso");
+    });
+
+    el.btnLimpar.addEventListener("click", () => {
+        const quantidade = paradas.filter(p => p.concluida).length;
+        if (!quantidade) {
+            mostrarStatus("Ainda não há entregas concluídas para remover.", "normal");
+            return;
+        }
+        paradas = paradas.filter(p => !p.concluida);
+        renderizar();
+        mostrarStatus(`${quantidade} entrega(s) concluída(s) removida(s).`, "sucesso");
+    });
+
+    el.btnResetar.addEventListener("click", () => {
+        if (!confirm("Deseja apagar todas as paradas e reiniciar a rota? Essa ação não pode ser desfeita.")) return;
+        paradas = [];
+        rotaIniciada = false;
+        renderizar();
+        mostrarStatus("Rota apagada. Você pode começar uma nova.", "sucesso");
+    });
+
+    el.btnAjustarMapa.addEventListener("click", enquadrarMapa);
+
+    // OCR real no navegador com Tesseract.js. O usuário revisa o texto antes de adicionar.
+    el.btnCamera.addEventListener("click", () => el.inputCamera.click());
+    el.inputCamera.addEventListener("change", async evento => {
+        const arquivo = evento.target.files?.[0];
+        if (!arquivo) return;
+        if (!arquivo.type.startsWith("image/")) {
+            mostrarStatus("Selecione um arquivo de imagem válido.", "erro");
+            return;
+        }
+        const original = el.btnCamera.innerHTML;
+        setBotaoCarregando(el.btnCamera, true, original, "Lendo imagem...");
+        mostrarStatus("Reconhecendo o texto da imagem. Isso pode levar alguns segundos...", "normal");
+        try {
+            if (!window.Tesseract) throw new Error("O serviço de OCR não carregou. Verifique sua conexão.");
+            const resultado = await Tesseract.recognize(arquivo, "por+eng");
+            const texto = resultado.data.text
+                .split(/\r?\n/)
+                .map(linha => linha.trim())
+                .filter(Boolean)
+                .join(", ");
+            if (!texto) throw new Error("Nenhum texto foi identificado. Tente uma foto mais nítida.");
+            el.inputEndereco.value = texto;
+            coordenadaSelecionada = null;
+            mostrarStatus("Texto reconhecido. Revise e corrija o endereço antes de adicionar.", "sucesso");
+            el.inputEndereco.focus();
+        } catch (erro) {
+            mostrarStatus(erro.message || "Não foi possível reconhecer o texto da imagem.", "erro");
+        } finally {
+            setBotaoCarregando(el.btnCamera, false, original, "");
+            el.inputCamera.value = "";
+        }
+    });
+
+    // Inicialização
+    el.inputOrigem.value = origem.personalizado ? origem.endereco : "";
+    el.labelOrigem.textContent = origem.personalizado ? "Origem definida" : "Origem padrão";
+    if (origem.personalizado) el.ajudaOrigem.textContent = "Sua origem personalizada está salva neste navegador.";
+    renderizar();
+    setTimeout(() => map.invalidateSize(), 150);
+})();
