@@ -1,7 +1,7 @@
-import * as maplibregl from 'https://unpkg.com/maplibre-gl@6.3.0/dist/maplibre-gl.mjs';
+let maplibregl = null; // O mapa é carregado de forma isolada: falhas da CDN não interrompem os cadastros.
 
 /**
- * RotaFácil V5 — interface simples, geocodificação conservadora e otimização sob demanda.
+ * RotaFácil V6 — revisão técnica, ancoragem viária, otimização sob demanda e entrega simplificada.
  * Serviços públicos são configurados aqui; o usuário final não precisa configurar nada.
  * Para operação comercial em escala, use serviços com contrato/servidor próprios.
  */
@@ -9,10 +9,16 @@ const CONFIG = Object.freeze({
   mapStyle: 'https://tiles.openfreemap.org/styles/positron',
   photon: 'https://photon.komoot.io',
   osrm: 'https://router.project-osrm.org',
+  overpass: 'https://overpass-api.de/api/interpreter',
+  raioChegadaMetros: 10,
+  gpsPrecisaoMaxima: 10,
+  maxSnapMetros: 130,
   sugestaoDelay: 750,
   intervaloMinBusca: 1100,
   intervaloGPS: 5000,
   maxPontosRoteamento: 24,
+  limiteTempoBuscaMs: 12000,
+  limiteTempoRotaMs: 18000,
   cidadePadrao: 'São José dos Campos',
   ufPadrao: 'SP',
   origemPadrao: { endereco: 'Centro de São José dos Campos, SP (aproximado)', lat: -23.1794, lon: -45.8869, personalizado: false }
@@ -25,8 +31,8 @@ const ui = {
   reviewRua: $('review-rua'), reviewNumero: $('review-numero'), reviewBairro: $('review-bairro'),
   reviewCidade: $('review-cidade'), reviewUf: $('review-uf'), reviewCep: $('review-cep'),
   btnConfirmar: $('btn-confirmar-endereco'), btnEditar: $('btn-editar-endereco'),
-  btnMarcar: $('btn-marcar-mapa'), btnSalvarAprox: $('btn-salvar-aproximado'),
-  precisao: $('resultado-precisao'), aproxAcoes: $('aproximacao-acoes'),
+  reviewNotas: $('review-notas'), reviewPrioridade: $('review-prioridade'), reviewTempo: $('review-tempo'),
+  precisao: $('resultado-precisao'), avisoChegada: $('aviso-chegada'),
   lista: $('lista-entregas'), contador: $('contador-paradas'), resumo: $('resumo-entregas'),
   btnLimpar: $('btn-limpar'), btnOtimizar: $('btn-otimizar'), btnComecar: $('btn-comecar-rota'),
   btnResetar: $('btn-resetar-rota'), btnCamera: $('btn-camera'), inputCamera: $('input-file-camera'),
@@ -42,6 +48,8 @@ const ui = {
   heroStatus: $('hero-status'), heroDistancia: $('hero-distancia'), heroTempo: $('hero-tempo'),
   heroPendentes: $('hero-pendentes'), optimizationMessage: $('optimization-message')
 };
+const faltantes=Object.entries(ui).filter(([,elemento])=>!elemento).map(([nome])=>nome);
+if(faltantes.length)throw new Error('Elementos obrigatórios do RotaFácil ausentes: '+faltantes.join(', '));
 const KEYS = {
   paradas: 'rotafacil_paradas',
   origem: 'rotafacil_origem',
@@ -52,35 +60,71 @@ function ler(chave, fallback) {
   try { const v = localStorage.getItem(chave); return v === null ? fallback : JSON.parse(v); }
   catch { return fallback; }
 }
-const coordenadasValidas = p => p && Number.isFinite(Number(p.lat)) && Number.isFinite(Number(p.lon)) &&
+const coordenadasValidas = p => p && p.lat != null && p.lon != null && p.lat !== '' && p.lon !== '' &&
+  Number.isFinite(Number(p.lat)) && Number.isFinite(Number(p.lon)) &&
   Math.abs(Number(p.lat)) <= 90 && Math.abs(Number(p.lon)) <= 180;
 function normalizarParadas(valor) {
   return Array.isArray(valor) ? valor.filter(p => p && coordenadasValidas(p) && typeof p.endereco === 'string')
     .map(p => ({ id: String(p.id || `${Date.now()}-${Math.random()}`), endereco: p.endereco,
       lat: Number(p.lat), lon: Number(p.lon), concluida: Boolean(p.concluida),
-      precisao: p.precisao || 'legado', campos: p.campos || null })) : [];
+      precisao: p.precisao || 'legado', campos: p.campos || null,
+      acesso: p.acesso || null, urgente: Boolean(p.urgente),
+      notas: String(p.notas || '').slice(0,200), tempoParada: Math.min(120, Math.max(0, Number(p.tempoParada) || 0)) })) : [];
 }
 let origem = ler(KEYS.origem, { ...CONFIG.origemPadrao });
 if (!coordenadasValidas(origem)) origem = { ...CONFIG.origemPadrao };
 let paradas = normalizarParadas(ler(KEYS.paradas, []));
 let rotaIniciada = Boolean(ler(KEYS.iniciada, false));
 let planejamento = ler(KEYS.planejamento, null);
+// O armazenamento local pode estar corrompido ou conter o formato de versões antigas.
+if (!planejamento || typeof planejamento !== 'object' ||
+    !Array.isArray(planejamento.coordenadas) ||
+    !planejamento.coordenadas.every(p => Array.isArray(p) && p.length === 2 &&
+      p.every(Number.isFinite)) ||
+    (planejamento.km != null && !Number.isFinite(planejamento.km)) ||
+    (planejamento.min != null && !Number.isFinite(planejamento.min))) planejamento = null;
 let mapPronto = false, mapa, marcadores = [], marcadorPrevia = null, marcadorGPS = null;
-let gpsWatchId = null, gpsTimer = null, ultimaPosicaoGPS = null, instanteExibidoGPS = 0, acompanharGPS = false;
-let mapaEmSelecao = false, localManual = null, aproximadoPendente = null, idEmEdicao = null;
+let gpsWatchId = null, gpsTimer = null, ultimaPosicaoGPS = null, instanteExibidoGPS = 0, acompanharGPS = false, gpsVersao = 0;
+let idEmEdicao = null;
+const destinosAvisados = new Set();
 let debounceBusca = null, buscaController = null, buscaSequencia = 0;
 let sugestoesAtuais = [], sugestaoDestacada = -1, textoOriginalBusca = '';
 let filaBusca = Promise.resolve(), ultimaChamadaPhoton = 0;
-let ultimoErroMapa = false, tokenDesenho = 0;
+let ultimoErroMapa = false;
+let revisaoVersao = 0, revisaoController = null, otimizacaoEmCurso = false;
 const cacheBusca = new Map();
 
 function chaveDaRota() {
   // Uma edição de endereço/origem invalida o plano, mas concluir uma entrega não.
   return JSON.stringify({ origem: [origem.lat, origem.lon],
-    paradas: paradas.map(p => [p.id, p.lat, p.lon]) });
+    paradas: paradas.map(p => [p.id, p.lat, p.lon, p.urgente, p.tempoParada]) });
 }
 function rotaOtimizada() {
-  return Boolean(planejamento && planejamento.chave === chaveDaRota() && Array.isArray(planejamento.coordenadas));
+  return Boolean(planejamento && planejamento.chave === chaveDaRota() &&
+    Array.isArray(planejamento.coordenadas));
+}
+// Concluir/desfazer uma parada não invalida a rota pronta, mas invalida um cálculo ainda em andamento.
+function assinaturaCalculo() {
+  return JSON.stringify({ origem: [origem.lat, origem.lon],
+    paradas: paradas.map(p => [p.id, p.lat, p.lon, p.concluida, p.urgente, p.tempoParada]) });
+}
+async function fetchComTimeout(url, { signal, timeout = CONFIG.limiteTempoBuscaMs } = {}) {
+  const controller = new AbortController();
+  const abortar = () => controller.abort();
+  if (signal?.aborted) controller.abort();
+  else signal?.addEventListener('abort', abortar, { once: true });
+  let expirou = false;
+  const timeoutId = setTimeout(() => { expirou=true; controller.abort(); }, timeout);
+  try { return await fetch(url, { signal: controller.signal, headers: { Accept: 'application/json' } }); }
+  catch (erro) {
+    // Diferenciar demora do provedor de um cancelamento feito pelo usuário.
+    if (expirou && !signal?.aborted) {
+      const falha = new Error('A consulta demorou demais. Tente novamente.');
+      falha.name = 'TimeoutError';
+      throw falha;
+    }
+    throw erro;
+  } finally { clearTimeout(timeoutId); signal?.removeEventListener('abort', abortar); }
 }
 if (!rotaOtimizada()) { planejamento = null; rotaIniciada = false; }
 function salvar() {
@@ -115,42 +159,64 @@ function distanciaMetros(a,b) { const rad=Math.PI/180, dy=(b.lat-a.lat)*rad, dx=
   const h=Math.sin(dy/2)**2+Math.cos(a.lat*rad)*Math.cos(b.lat*rad)*Math.sin(dx/2)**2;
   return 12742000*Math.atan2(Math.sqrt(h),Math.sqrt(Math.max(0,1-h))); }
 function urlNavegacao(p) {
-  const dest = p.precisao === 'aproximado' ? encodeURIComponent(p.endereco.replaceAll(' — ', ', ')) : `${p.lat},${p.lon}`;
-  return `https://www.google.com/maps/dir/?api=1&destination=${dest}&travelmode=driving`;
+  // Sempre navega para o ponto viário armazenado, nunca reinterpreta o texto no Google Maps.
+  return `https://www.google.com/maps/dir/?api=1&destination=${p.lat},${p.lon}&travelmode=driving`;
 }
 function invalidarPlano() {
+  destinosAvisados.clear();
   planejamento = null;
   rotaIniciada = false;
   atualizarLinha();
 }
 
 // ---------- MAPA: PONTOS DESDE O CADASTRO; LINHA APENAS DEPOIS DA OTIMIZAÇÃO ----------
-try {
-  mapa = new maplibregl.Map({ container: 'map', style: CONFIG.mapStyle,
-    center: [Number(origem.lon), Number(origem.lat)], zoom: 13, attributionControl: true });
-  mapa.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'bottom-right');
-  mapa.on('load', () => {
-    mapPronto = true;
-    mapa.addSource('percurso', { type: 'geojson', data: linhaVazia() });
-    mapa.addLayer({ id: 'percurso-tracado', type: 'line', source: 'percurso',
-      layout: { 'line-cap':'round', 'line-join':'round' },
-      paint: { 'line-color':'#1c8b70', 'line-width':5, 'line-opacity': .94,
-        'line-dasharray':[1,0.08] } });
-    mapa.addSource('gps-area', { type:'geojson', data: linhaVazia() });
-    mapa.addLayer({ id:'gps-previsao',type:'fill',source:'gps-area',
-      paint:{ 'fill-color':'#2c89e8', 'fill-opacity':.13 } },'percurso-tracado');
-    mapa.addLayer({ id:'gps-previsao-contorno',type:'line',source:'gps-area',
-      paint:{ 'line-color':'#2c89e8', 'line-opacity':.55, 'line-width':1.4 } },'percurso-tracado');
-    desenharMarcadores(); atualizarLinha(); enquadrar();
-    if (ultimaPosicaoGPS) atualizarGPS(true);
-  });
-  mapa.on('error', e => {
-    console.warn('Mapa:', e.error);
-    if (!mapPronto && !ultimoErroMapa) { ultimoErroMapa = true; ui.statusMapa.textContent = 'O mapa não carregou. Confira sua conexão e tente atualizar a página.'; }
-  });
-  mapa.on('dragstart', () => { acompanharGPS = false; });
-  mapa.on('click', e => { if (mapaEmSelecao) escolherPonto(e.lngLat.lat, e.lngLat.lng); });
-} catch(e) { console.error('Mapa indisponível:', e); ui.statusMapa.textContent='Não foi possível abrir o mapa neste aparelho.'; }
+async function iniciarMapa() {
+  const fontes = [
+    'https://unpkg.com/maplibre-gl@6.3.0/dist/maplibre-gl.mjs',
+    'https://cdn.jsdelivr.net/npm/maplibre-gl@6.3.0/dist/maplibre-gl.mjs'
+  ];
+  for (const fonte of fontes) {
+    try { maplibregl = await import(fonte); break; }
+    catch (erro) { console.warn('Falha ao carregar o mapa:', erro); }
+  }
+  if (!maplibregl) {
+    ui.statusMapa.textContent = 'Mapa indisponível no momento. A lista de entregas continua funcionando.';
+    ui.mapHint.textContent = 'Verifique sua conexão e recarregue a página para tentar abrir o mapa.';
+    ui.btnAjustar.disabled = true;
+    return;
+  }
+  try {
+    mapa = new maplibregl.Map({ container: 'map', style: CONFIG.mapStyle,
+      center: [Number(origem.lon), Number(origem.lat)], zoom: 13, attributionControl: true });
+    mapa.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'bottom-right');
+    mapa.on('load', () => {
+      mapPronto = true;
+      mapa.addSource('percurso', { type: 'geojson', data: linhaVazia() });
+      mapa.addLayer({ id: 'percurso-tracado', type: 'line', source: 'percurso',
+        layout: { 'line-cap':'round', 'line-join':'round' },
+        paint: { 'line-color':'#1c8b70', 'line-width':5, 'line-opacity': .94,
+          'line-dasharray':[1,0.08] } });
+      mapa.addSource('gps-area', { type:'geojson', data: linhaVazia() });
+      mapa.addLayer({ id:'gps-previsao',type:'fill',source:'gps-area',
+        paint:{ 'fill-color':'#2c89e8', 'fill-opacity':.13 } },'percurso-tracado');
+      mapa.addLayer({ id:'gps-previsao-contorno',type:'line',source:'gps-area',
+        paint:{ 'line-color':'#2c89e8', 'line-opacity':.55, 'line-width':1.4 } },'percurso-tracado');
+      desenharMarcadores(); atualizarLinha(); enquadrar();
+      if (ultimaPosicaoGPS) atualizarGPS(true);
+    });
+    mapa.on('error', e => {
+      console.warn('Mapa:', e.error);
+      if (!mapPronto && !ultimoErroMapa) {
+        ultimoErroMapa = true;
+        ui.statusMapa.textContent = 'Mapa indisponível. Confira a conexão e recarregue a página.';
+      }
+    });
+    mapa.on('dragstart', () => { acompanharGPS = false; });
+  } catch (erro) {
+    console.error('Mapa indisponível:', erro);
+    ui.statusMapa.textContent = 'Não foi possível abrir o mapa neste aparelho.';
+  }
+}
 function linhaVazia() { return { type:'FeatureCollection', features:[] }; }
 function definirLinha(coords, aproximada) {
   if (!mapPronto) return;
@@ -178,13 +244,13 @@ function desenharMarcadores() {
     const tipo = p.concluida ? 'concluida' : (proxima?.id===p.id ? 'proxima' : 'parada');
     const pin = new maplibregl.Marker({ element:criarPin(i+1,tipo),anchor:'center' })
       .setLngLat([p.lon,p.lat]).setPopup(new maplibregl.Popup({offset:20})
-        .setHTML(`<b>Parada ${i+1}</b><br>${htmlSeguro(p.endereco)}<br><small>${p.precisao==='manual'?'Localização marcada no mapa':p.precisao==='confirmado'?'Número encontrado':'Localização a conferir'}</small>`))
+        .setHTML(`<b>Parada ${i+1}</b><br>${htmlSeguro(p.endereco)}<br><small>${p.precisao==='entrada'?'Entrada predial mapeada':p.precisao==='confirmado'?'Número localizado — acesso pela rua':'Ponto aproximado na rua'}</small>`))
       .addTo(mapa);
     marcadores.push(pin);
   });
 }
 function enquadrar() {
-  if (!mapa) return;
+  if (!mapa || !mapPronto) return;
   const pts = [[Number(origem.lon),Number(origem.lat)],...paradas.map(p=>[p.lon,p.lat])];
   if (pts.length===1) mapa.easeTo({center:pts[0],zoom:14,duration:250});
   else { const bbox=new maplibregl.LngLatBounds(pts[0],pts[0]); pts.forEach(p=>bbox.extend(p));
@@ -202,8 +268,14 @@ function interpretarEndereco(entrada) {
   if (!achado) {
     // Sem vírgula, o último token numérico pode ser o número da casa.
     // Não confunde "Rua 7 de Setembro" com um imóvel.
-    const numeros=[...semCep.matchAll(/\b\d{1,6}[a-z]?\b/gi)].filter(m =>
-      !/^\s+de\b/i.test(semCep.slice(m.index+m[0].length)) || m.index > 10);
+    const numeros=[...semCep.matchAll(/\b\d{1,6}[a-z]?\b/gi)].filter(m => {
+      const antes=semCep.slice(0,m.index).trim();
+      const depois=semCep.slice(m.index+m[0].length).trim();
+      // Rua 7 de Setembro, Rua 13 de Maio, Rua 15: não inventar número de imóvel.
+      if (/^de\b/i.test(depois)) return false;
+      if (!/[a-záàâãéêíóôõúç]{3,}/i.test(antes.replace(/^(rua|av(?:enida)?|travessa)\s+/i,''))) return false;
+      return true;
+    });
     const ultimo=numeros.at(-1);
     if (ultimo) {
       achado=[null,semCep.slice(0,ultimo.index),ultimo[0],semCep.slice(ultimo.index+ultimo[0].length)];
@@ -213,16 +285,31 @@ function interpretarEndereco(entrada) {
     rua=achado[1].trim().replace(/\b(?:n|nº|n°|numero|número)\.?$/i,'').replace(/[\s,;-]+$/,'');
     numero=achado[2]; complemento=achado[3].replace(/^[\s,;-]+/,'').trim();
   }
-  const cidadeEncontrada=complemento.match(/(?:^|,|\s)(São José dos Campos|Jacareí|Caçapava|Taubaté|Pindamonhangaba)(?:\s*[,\/-]\s*(SP))?\s*$/i);
-  let cidade=CONFIG.cidadePadrao, bairro=complemento;
-  if (cidadeEncontrada) { cidade=cidadeEncontrada[1]; bairro=complemento.slice(0,cidadeEncontrada.index).replace(/[\s,;]+$/,'').trim(); }
-  if (bairro.toUpperCase()==='SP') bairro='';
-  return { rua:rua||original,numero,bairro,cidade,uf:'SP',cep:(original.match(/\b\d{5}-?\d{3}\b/)||[])[0]||'' };
+  // Aceita cidades fora do Vale do Paraíba quando informadas com separação clara.
+  // Ex.: "Rua das Flores, 123, Centro, Campinas - SP".
+  const blocos=complemento.split(',').map(x=>x.trim()).filter(Boolean);
+  let cidade=CONFIG.cidadePadrao,bairro=complemento,uf=CONFIG.ufPadrao;
+  const ultimaParte=blocos.at(-1)||'';
+  const cidadeUF=ultimaParte.match(/^(.+?)\s*[-/]\s*([A-Za-z]{2})$/);
+  if(cidadeUF){
+    cidade=cidadeUF[1].trim(); uf=cidadeUF[2].toUpperCase();
+    bairro=blocos.slice(0,-1).join(', ');
+  }else if(blocos.length>=2 && /^[A-Za-z]{2}$/.test(ultimaParte)){
+    uf=ultimaParte.toUpperCase();cidade=blocos.at(-2);
+    bairro=blocos.slice(0,-2).join(', ');
+  }else{
+    const conhecida=complemento.match(/(?:^|,|\s)(São José dos Campos|Jacareí|Caçapava|Taubaté|Pindamonhangaba)(?:\s*[,\/-]\s*(SP))?\s*$/i);
+    if(conhecida){cidade=conhecida[1];bairro=complemento.slice(0,conhecida.index).replace(/[\s,;]+$/,'').trim();}
+  }
+  if(bairro.toUpperCase()===uf)bairro='';
+  return {rua:rua||original,numero,bairro,cidade,uf,cep:(original.match(/\b\d{5}-?\d{3}\b/)||[])[0]||''};
 }
 function camposAtuais() {
   return {rua:ui.reviewRua.value.trim(), numero:ui.reviewNumero.value.trim(),
     bairro:ui.reviewBairro.value.trim(), cidade:ui.reviewCidade.value.trim(),
-    uf:ui.reviewUf.value.trim().toUpperCase(), cep:ui.reviewCep.value.trim()};
+    uf:ui.reviewUf.value.trim().toUpperCase(), cep:ui.reviewCep.value.trim(),
+    notas:ui.reviewNotas.value.trim(),urgente:ui.reviewPrioridade.checked,
+    tempoParada:Math.min(120,Math.max(0,Number(ui.reviewTempo.value)||0))};
 }
 function enderecoCompleto(c) {
   return [c.rua+(c.numero?`, ${c.numero}`:''),c.bairro,`${c.cidade} - ${c.uf}`,c.cep?`CEP ${c.cep}`:'']
@@ -246,12 +333,13 @@ function tratarPhoton(feature) {
   const rua=p.street||(['street','house'].includes(p.type)?p.name:'');
   if (!rua || !Number.isFinite(arr[0]) || !Number.isFinite(arr[1])) return null;
   return {rua,numero:String(p.housenumber||''),bairro:p.district||p.locality||p.suburb||'',
-    cidade:p.city||'',uf:obterUF(p.state),cep:p.postcode||'',lat:Number(arr[1]),lon:Number(arr[0])};
+    cidade:p.city||'',uf:obterUF(p.state),cep:p.postcode||'', pais:String(p.countrycode||'').toUpperCase(),
+    lat:Number(arr[1]),lon:Number(arr[0])};
 }
 function pontuarCandidato(c,campos) {
-  if (!mesmaRua(c.rua,campos.rua)) return -1000;
+  if (!mesmaRua(c.rua,campos.rua) || (c.pais && c.pais !== 'BR')) return -1000;
   const cidadeOk = !campos.cidade || !c.cidade || normalizar(c.cidade)===normalizar(campos.cidade);
-  if (!cidadeOk) return -500;
+  if (!cidadeOk || (campos.uf && c.uf && campos.uf!==c.uf)) return -1000;
   const bairroOk = !campos.bairro || !c.bairro || normalizar(c.bairro)===normalizar(campos.bairro);
   const numeroOk = !!(campos.numero && mesmoNumero(campos.numero,c.numero));
   return 30+(c.cidade?14:0)+(bairroOk?8:-12)+(numeroOk?36:0)+(c.numero&&!numeroOk?-12:0);
@@ -271,7 +359,7 @@ async function photon(url, signal) {
     if (espera) await new Promise(r=>setTimeout(r,espera));
     if (signal?.aborted) throw new DOMException('Busca cancelada','AbortError');
     ultimaChamadaPhoton=Date.now();
-    const r=await fetch(url,{signal,headers:{Accept:'application/json'}});
+    const r=await fetchComTimeout(url,{signal});
     if(!r.ok) throw new Error('A pesquisa de endereços está temporariamente indisponível.');
     resultado=await r.json();
   });
@@ -279,7 +367,7 @@ async function photon(url, signal) {
   await job; return resultado;
 }
 async function pesquisarPhoton(texto,{signal,limite=10}={}) {
-  const params=new URLSearchParams({q:texto,lang:'pt',limit:String(limite),lat:String(origem.lat),lon:String(origem.lon)});
+  const params=new URLSearchParams({q:texto,lang:'pt',limit:String(limite),countrycode:'BR',lat:String(origem.lat),lon:String(origem.lon)});
   const dados=await photon(`${CONFIG.photon}/api/?${params}`,signal);
   return (dados.features||[]).map(tratarPhoton).filter(Boolean);
 }
@@ -380,14 +468,13 @@ function precisão(tipo,msg) {
   const ic=document.createElement('i');ic.className=`fa-solid ${tipo==='ok'?'fa-circle-check':tipo==='alerta'?'fa-triangle-exclamation':'fa-circle-info'}`;
   const p=document.createElement('span');p.textContent=msg;ui.precisao.append(ic,p);
 }
-function cancelarPino() {
-  mapaEmSelecao=false;document.body.classList.remove('modo-marcar-mapa');
-  if(marcadorPrevia) marcadorPrevia.remove();marcadorPrevia=null;
-  ui.mapHint.textContent='Os pinos aparecem quando você adiciona endereços.';
+function cancelarConferencia() {
+  revisaoVersao++;
+  revisaoController?.abort(); revisaoController=null;
+  busy(ui.btnConfirmar,false);
 }
 function fecharRevisao() {
-  ui.revisao.classList.add('hidden');ui.aproxAcoes.classList.add('hidden');
-  localManual=null;aproximadoPendente=null;idEmEdicao=null;cancelarPino();
+  cancelarConferencia(); ui.revisao.classList.add('hidden'); idEmEdicao=null;
 }
 function prepararRevisao(sugestao=null, paradaExistente=null) {
   cancelarBusca();fecharSugestoes();fecharRevisao();
@@ -411,94 +498,172 @@ function prepararRevisao(sugestao=null, paradaExistente=null) {
   ui.endereco.value=enderecoCompleto(dado);
   precisão('normal', idEmEdicao ? 'Confira as informações. Ao confirmar, vamos localizar o endereço novamente.'
     : 'Confira o endereço. Ao confirmar, vamos verificar o ponto no mapa.');
+  ui.reviewNotas.value=paradaExistente?.notas||'';
+  ui.reviewPrioridade.checked=Boolean(paradaExistente?.urgente);
+  ui.reviewTempo.value=String(paradaExistente?.tempoParada||0);
   ui.btnConfirmar.innerHTML=`<i class="fa-solid fa-check"></i> ${idEmEdicao?'Salvar alteração':'OK, confirmar'}`;
   ui.revisao.scrollIntoView({behavior:'smooth',block:'nearest'});
-  if(sugestao&&mapa) mapa.flyTo({center:[sugestao.lon,sugestao.lat],zoom:16,duration:450});
+  if(sugestao&&mapPronto&&mapa) mapa.flyTo({center:[sugestao.lon,sugestao.lat],zoom:16,duration:450});
 }
 // Ao confirmar, buscamos NOVAMENTE, inclusive se o número foi editado.
-async function geocodificarRevisado(campos) {
+async function geocodificarRevisado(campos, signal) {
+  // Consulta estruturada é mais previsível que tentar adivinhar o número na string livre.
   let resultados=[];
-  try { resultados=await pesquisarPhoton(pesquisaCompleta(campos),{limite:12}); }
-  catch(e) { console.warn('Consulta completa:',e); }
+  if (campos.numero) {
+    const params=new URLSearchParams({street:campos.rua,housenumber:campos.numero,
+      city:campos.cidade,countrycode:'BR',limit:'12',lang:'pt'});
+    if (campos.bairro) params.set('district',campos.bairro);
+    if (campos.cep) params.set('postcode',campos.cep.replace(/\D/g,''));
+    try {
+      const data=await photon(`${CONFIG.photon}/structured?${params}`,signal);
+      resultados=(data.features||[]).map(tratarPhoton).filter(Boolean);
+    } catch (e) {
+      if (e.name==='AbortError') throw e;
+      console.warn('Consulta estruturada:',e);
+    }
+  }
+  // A busca livre complementa a estruturada; não considera o número confirmado por aproximação.
+  if (!resultados.some(r=>mesmoNumero(r.numero,campos.numero))) {
+    try { resultados.push(...await pesquisarPhoton(pesquisaCompleta(campos),{limite:12,signal})); }
+    catch(e) { if(e.name==='AbortError')throw e; console.warn('Busca completa:',e); }
+  }
   let ordenados=ordenarResultados(resultados,campos);
   if(!ordenados.length || !ordenados.some(r=>mesmoNumero(r.numero,campos.numero))) {
-    // Nova consulta da rua, sem inventar coordenadas para o número digitado.
     try {
-      resultados=await pesquisarPhoton([campos.rua,campos.bairro,campos.cidade].filter(Boolean).join(' '),{limite:12});
-      ordenados=ordenarResultados([...ordenados,...resultados],campos);
-    } catch(e) { if(!ordenados.length)throw e; }
+      const rua=await pesquisarPhoton([campos.rua,campos.bairro,campos.cidade].filter(Boolean).join(' '),{limite:12,signal});
+      ordenados=ordenarResultados([...ordenados,...rua],campos);
+    } catch(e) { if(e.name==='AbortError'||!ordenados.length)throw e; }
   }
-  const melhor=ordenados[0];
+  // Prioriza um resultado com número correspondente. Endereços sem dados de cidade/UF não são exatos.
+  const comNumero=ordenados.find(r=>campos.numero&&mesmoNumero(r.numero,campos.numero)&&
+    r.cidade&&normalizar(r.cidade)===normalizar(campos.cidade)&&r.uf===campos.uf&&
+    (!campos.bairro||!r.bairro||normalizar(r.bairro)===normalizar(campos.bairro)));
+  const melhor=comNumero||ordenados[0];
   if(!melhor)return null;
-  const cidadeOK=!melhor.cidade || normalizar(melhor.cidade)===normalizar(campos.cidade);
   const bairroOK=!campos.bairro||!melhor.bairro||normalizar(melhor.bairro)===normalizar(campos.bairro);
-  const exato=Boolean(campos.numero&&mesmoNumero(campos.numero,melhor.numero)&&mesmaRua(campos.rua,melhor.rua)&&cidadeOK&&bairroOK);
+  const exato=Boolean(comNumero&&bairroOK);
   return {...melhor,exato};
 }
-function adicionarOuAtualizar(campos,lat,lon,precisao) {
-  const endereco=enderecoCompleto(campos);
-  if(idEmEdicao) {
-    paradas=paradas.map(p=>p.id===idEmEdicao?{...p,endereco,lat,lon,precisao,campos}:p);
-  } else {
-    paradas.push({id:`${Date.now()}-${Math.random().toString(36).slice(2,8)}`,endereco,
-      lat,lon,precisao,campos,concluida:false});
+// Resolve a navegação na rua correta. A entrada mapeada é opcional e não é inventada.
+function distanciaArestaMetros(p, a, b) {
+  const escalaX=111320*Math.cos(p.lat*Math.PI/180), escalaY=111320;
+  const x=(p.lon-a.lon)*escalaX,y=(p.lat-a.lat)*escalaY;
+  const dx=(b.lon-a.lon)*escalaX,dy=(b.lat-a.lat)*escalaY;
+  const t=Math.max(0,Math.min(1,(x*dx+y*dy)/Math.max(.001,dx*dx+dy*dy)));
+  return Math.hypot(x-t*dx,y-t*dy);
+}
+async function entradaPredialMapeada(campos, posicao, signal) {
+  if(!campos.numero) return null;
+  // Só aceita entrada em edifício cujo número E rua correspondam aos do pedido.
+  // Overpass/OSM não possuem entradas para todos os imóveis: ausência é normal.
+  const q=`[out:json][timeout:6];(way(around:35,${posicao.lat},${posicao.lon})["building"]["addr:housenumber"];node(around:35,${posicao.lat},${posicao.lon})["entrance"];);out geom;`;
+  try {
+    const resposta=await fetchComTimeout(`${CONFIG.overpass}?data=${encodeURIComponent(q)}`,{signal,timeout:5500});
+    if(!resposta.ok) return null;
+    const dados=await resposta.json();
+    const elementos=dados.elements||[];
+    const predios=elementos.filter(e=>e.type==='way' &&
+      mesmoNumero(e.tags?.['addr:housenumber'],campos.numero) &&
+      mesmaRua(e.tags?.['addr:street'],campos.rua) && e.geometry?.length>=3);
+    if(!predios.length)return null;
+    const entradas=elementos.filter(e=>e.type==='node'&&e.tags?.entrance &&
+      Number.isFinite(e.lat)&&Number.isFinite(e.lon));
+    const candidatas=[];
+    for(const predio of predios)for(const entrada of entradas){
+      const p={lat:entrada.lat,lon:entrada.lon};
+      const borda=Math.min(...predio.geometry.map((a,i)=>{
+        const b=predio.geometry[(i+1)%predio.geometry.length];
+        return distanciaArestaMetros(p,{lat:a.lat,lon:a.lon},{lat:b.lat,lon:b.lon});
+      }));
+      if(borda<=3) candidatas.push({lat:p.lat,lon:p.lon,
+        score:(entrada.tags.entrance==='main'?100:0)-distanciaMetros(p,posicao)});
+    }
+    candidatas.sort((a,b)=>b.score-a.score);
+    return candidatas[0]||null;
+  }catch(e){if(e.name==='AbortError')throw e;return null;}
+}
+async function encaixarNaRua(campos, posicao, signal) {
+  const url=`${CONFIG.osrm}/nearest/v1/driving/${posicao.lon},${posicao.lat}?number=5`;
+  try {
+    const resposta=await fetchComTimeout(url,{signal,timeout:6500});
+    if(!resposta.ok)throw new Error('Via indisponível');
+    const dados=await resposta.json();
+    const vias=(dados.waypoints||[]).filter(p=>Array.isArray(p.location)&&Number.isFinite(p.distance));
+    const comNome=vias.find(p=>mesmaRua(p.name,campos.rua)&&p.distance<=CONFIG.maxSnapMetros);
+    // Sem nome correspondente: só permite usar um segmento MUITO próximo.
+    // Não afirma que é a rua correta nesse caso.
+    const proxima=vias.find(p=>p.distance<=18);
+    const via=comNome||proxima;
+    if(!via)return { ...posicao, viaConfirmada:false, deslocamento:null };
+    return {lat:via.location[1],lon:via.location[0],viaConfirmada:Boolean(comNome),deslocamento:via.distance};
+  }catch(e){if(e.name==='AbortError')throw e;return { ...posicao, viaConfirmada:false, deslocamento:null };}
+}
+async function resolverPontoDeEntrega(campos, achado, signal) {
+  let predio=null;
+  if(achado.exato) {
+    try { predio=await entradaPredialMapeada(campos,achado,signal); }
+    catch(e){ if(e.name==='AbortError')throw e; }
   }
-  const editando=!!idEmEdicao;
+  const base=predio||{lat:achado.lat,lon:achado.lon};
+  const acesso=await encaixarNaRua(campos,base,signal);
+  return {
+    lat:acesso.lat,lon:acesso.lon,
+    precisao: predio&&acesso.viaConfirmada ? 'entrada' :
+      achado.exato && acesso.viaConfirmada ? 'confirmado' : 'aproximado',
+    acesso:{fonte:predio?'entrada_mapeada':achado.exato?'numero_geocodificado':'referencia_da_rua',
+      viaConfirmada:acesso.viaConfirmada,distanciaAteVia:acesso.deslocamento,
+      pontoImovel:{lat:achado.lat,lon:achado.lon}}
+  };
+}
+function adicionarOuAtualizar(campos,local) {
+  const endereco=enderecoCompleto(campos);
+  const valores={endereco,lat:local.lat,lon:local.lon,precisao:local.precisao,
+    campos:{rua:campos.rua,numero:campos.numero,bairro:campos.bairro,
+      cidade:campos.cidade,uf:campos.uf,cep:campos.cep},
+    acesso:local.acesso,notas:campos.notas||'',urgente:Boolean(campos.urgente),
+    tempoParada:campos.tempoParada||0};
+  const editando=Boolean(idEmEdicao);
+  if(editando)paradas=paradas.map(p=>p.id===idEmEdicao?{...p,...valores}:p);
+  else paradas.push({id:`${Date.now()}-${Math.random().toString(36).slice(2,8)}`,
+    ...valores,concluida:false});
   ui.endereco.value='';textoOriginalBusca='';fecharRevisao();invalidarPlano();renderizar();
-  aviso(editando?'Endereço atualizado. Otimize novamente a rota.':
-    precisao==='aproximado'?'Parada adicionada como aproximada. Confira antes de navegar.':
-    'Parada adicionada. Você pode continuar cadastrando os destinos.');
+  aviso(editando?'Entrega atualizada. Otimize a rota novamente.':
+    local.precisao==='aproximado'?'Parada adicionada com ponto aproximado na rua.':
+    'Parada adicionada. Continue cadastrando seus destinos.');
 }
 ui.formRevisao.addEventListener('submit',async e=>{
-  e.preventDefault();const campos=camposAtuais();
-  if(!campos.rua||!campos.cidade||!campos.uf){precisão('alerta','Preencha pelo menos rua, cidade e estado.');return;}
-  if(localManual){adicionarOuAtualizar(campos,localManual.lat,localManual.lon,'manual');return;}
+  e.preventDefault();if(ui.btnConfirmar.disabled)return;
+  const campos=camposAtuais();
+  if(!campos.rua||!campos.cidade||!campos.uf){precisão('alerta','Preencha rua, cidade e UF.');return;}
+  if(!/^[A-Z]{2}$/.test(campos.uf)){precisão('alerta','Confira a sigla do estado.');return;}
+  cancelarConferencia();const versao=revisaoVersao;
+  revisaoController=new AbortController();const signal=revisaoController.signal;
   busy(ui.btnConfirmar,true,'Localizando...');
-  aproximadoPendente=null;ui.aproxAcoes.classList.add('hidden');
-  precisão('normal','Conferindo a localização...');
+  precisão('normal','Localizando o número e o melhor acesso pela rua...');
   try {
-    const p=await geocodificarRevisado(campos);
-    if(!p){precisão('alerta','Não encontramos essa rua. Revise os dados ou marque o local no mapa.');return;}
-    if(mapa)mapa.flyTo({center:[p.lon,p.lat],zoom:17,duration:550});
-    if(p.exato) adicionarOuAtualizar(campos,p.lat,p.lon,'confirmado');
-    else {
-      aproximadoPendente={lat:p.lat,lon:p.lon,campos};
-      ui.aproxAcoes.classList.remove('hidden');
-      precisão('alerta',campos.numero
-        ? `Encontramos a rua, mas não confirmamos o número ${campos.numero}. Marque o local no mapa ou salve como aproximado.`
-        : 'Localizamos a rua, mas o ponto pode ser aproximado. Marque no mapa ou salve assim.');
+    const ponto=await geocodificarRevisado(campos,signal);
+    if(versao!==revisaoVersao||ui.revisao.classList.contains('hidden'))return;
+    if(!ponto){precisão('alerta','Rua não encontrada. Confira bairro e cidade antes de continuar.');return;}
+    const destino=await resolverPontoDeEntrega(campos,ponto,signal);
+    if(versao!==revisaoVersao||ui.revisao.classList.contains('hidden'))return;
+    if(!coordenadasValidas(destino))throw new Error('Coordenadas inválidas');
+    adicionarOuAtualizar(campos,destino);
+  }catch(erro){
+    if(versao===revisaoVersao&&erro.name!=='AbortError'){
+      console.warn('Falha de endereço:',erro);
+      precisão('alerta','Não foi possível localizar esse endereço agora. Tente novamente.');
     }
-  }catch(e){precisão('alerta','Não conseguimos verificar o local agora. Tente de novo ou escolha o ponto no mapa.');}
-  finally{busy(ui.btnConfirmar,false);}
-});
-ui.btnSalvarAprox.addEventListener('click',()=>{
-  if(!aproximadoPendente)return;
-  const {lat,lon,campos}=aproximadoPendente;adicionarOuAtualizar(campos,lat,lon,'aproximado');
+  }finally{if(versao===revisaoVersao){busy(ui.btnConfirmar,false);revisaoController=null;}}
 });
 ui.btnEditar.addEventListener('click',()=>{ui.reviewRua.focus();ui.reviewRua.select();});
 ui.btnFecharRevisao.addEventListener('click',()=>{fecharRevisao();aviso('Conferência cancelada.');});
-for(const input of [ui.reviewRua,ui.reviewNumero,ui.reviewBairro,ui.reviewCidade,ui.reviewUf,ui.reviewCep]){
+for(const input of [ui.reviewRua,ui.reviewNumero,ui.reviewBairro,ui.reviewCidade,ui.reviewUf,ui.reviewCep,ui.reviewNotas,ui.reviewPrioridade,ui.reviewTempo]){
   input.addEventListener('input',()=>{
-    aproximadoPendente=null;localManual=null;ui.aproxAcoes.classList.add('hidden');cancelarPino();
-    precisão('normal','Endereço alterado. Clique em OK para localizar novamente.');
+    cancelarConferencia();
+    precisão('normal','Endereço alterado. Ao confirmar, buscamos o número novamente.');
   });
 }
-ui.btnMarcar.addEventListener('click',()=>{
-  if(ui.revisao.classList.contains('hidden'))return;
-  mapaEmSelecao=true;document.body.classList.add('modo-marcar-mapa');
-  ui.mapHint.textContent='Clique ou toque no ponto desejado para marcar a entrega.';
-  precisão('alerta','Toque no lugar certo no mapa. Depois volte e clique em OK.');
-  $('mapa').scrollIntoView({behavior:'smooth',block:'start'});
-});
-function escolherPonto(lat,lon){
-  cancelarPino();localManual={lat,lon};aproximadoPendente=null;
-  ui.aproxAcoes.classList.add('hidden');
-  if(mapa){const el=document.createElement('div');el.className='preview-pin';el.innerHTML='<i class="fa-solid fa-check"></i>';
-    marcadorPrevia=new maplibregl.Marker({element:el,anchor:'bottom'}).setLngLat([lon,lat]).addTo(mapa);}
-  precisão('ok','Local escolhido no mapa! Clique em OK para salvar a parada.');
-  ui.revisao.scrollIntoView({behavior:'smooth',block:'center'});
-}
-
+// Os campos de notas não invalidam a posição enquanto a pesquisa está em andamento.
 // ---------- PARADAS E RESUMO ----------
 function renderizar() {
   const feitas=paradas.filter(p=>p.concluida).length;
@@ -520,8 +685,8 @@ function renderizar() {
   ui.heroTempo.textContent=pronta&&planejamento.min!=null
     ? planejamento.min>=60?`${Math.floor(planejamento.min/60)}h ${Math.round(planejamento.min%60)}min`:`${Math.round(planejamento.min)} min`
     :'—';
-  ui.btnComecar.disabled=!pronta||!pendentes;
-  ui.btnOtimizar.disabled=!pendentes;
+  ui.btnComecar.disabled=!pronta||!pendentes||otimizacaoEmCurso;
+  ui.btnOtimizar.disabled=!pendentes||otimizacaoEmCurso;
 
   if(!paradas.length){
     ui.heroStatus.textContent='Pronto para planejar';
@@ -566,12 +731,19 @@ function renderizar() {
     const texto=document.createElement('div');texto.className='stop-details';
     const nome=document.createElement('strong');nome.textContent=p.endereco;
     const detalhe=document.createElement('small');
-    detalhe.textContent=p.concluida?'Entrega concluída':p.precisao==='aproximado'||p.precisao==='legado'
-      ? 'Localização aproximada — confira antes de sair':p.precisao==='manual'?'Ponto escolhido no mapa':'Endereço cadastrado';
-    texto.append(nome,detalhe);header.append(numero,texto);
+    const avisoPrecisao=p.precisao==='entrada'?'Entrada identificada':p.precisao==='confirmado'?'Número identificado':'Localização aproximada na rua';
+    const eta=pronta&&planejamento?.etaPorId?.[p.id]!=null?` · +${planejamento.etaPorId[p.id]} min`:'';
+    detalhe.textContent=(p.concluida?'Entrega concluída':avisoPrecisao)+eta+(p.urgente?' · PRIORITÁRIA':'');
+    if(p.notas){const nota=document.createElement('small');nota.className='stop-note';nota.textContent=`📦 ${p.notas}`;texto.append(nome,detalhe,nota);} 
+    if(!p.notas)texto.append(nome,detalhe);
+    header.append(numero,texto);
     const acoes=document.createElement('div');acoes.className='stop-actions';
     const nav=document.createElement('a');nav.className='stop-action';nav.href=urlNavegacao(p);
     nav.target='_blank';nav.rel='noopener noreferrer';nav.innerHTML='<i class="fa-solid fa-location-arrow"></i> Navegar';
+    const waze=document.createElement('a');waze.className='stop-action waze';
+    waze.href=`https://waze.com/ul?ll=${p.lat}%2C${p.lon}&navigate=yes`;
+    waze.rel='noopener noreferrer';waze.target='_blank';
+    waze.innerHTML='<i class="fa-solid fa-car"></i> Waze';
     const editar=document.createElement('button');editar.type='button';editar.className='stop-action';
     editar.innerHTML='<i class="fa-solid fa-pen"></i> Editar';
     editar.addEventListener('click',()=>{
@@ -589,7 +761,7 @@ function renderizar() {
     remover.addEventListener('click',()=>{
       paradas=paradas.filter(item=>item.id!==p.id);invalidarPlano();renderizar();aviso('Parada excluída.');
     });
-    acoes.append(nav,editar,entregue,remover);card.append(header,acoes);ui.lista.append(card);
+    acoes.append(nav,waze,editar,entregue,remover);card.append(header,acoes);ui.lista.append(card);
   });
   if(rotaIniciada&&proxima){
     ui.painel.classList.remove('hidden');
@@ -598,10 +770,14 @@ function renderizar() {
     ui.progresso.textContent=`${feitas} de ${paradas.length} concluídas`;
     ui.btnNavegar.href=urlNavegacao(proxima);
     ui.btnConcluir.onclick=()=>alternarConcluida(proxima.id);
-  } else {ui.painel.classList.add('hidden');}
+    ui.avisoChegada.classList.toggle('hidden',!destinosAvisados.has(proxima.id));
+    ui.avisoChegada.textContent=destinosAvisados.has(proxima.id)
+      ?(proxima.precisao==='aproximado'?'Você está perto do ponto estimado.':'Destino alcançado: você está a até 10 m do ponto de acesso.') : ''; 
+  } else {ui.painel.classList.add('hidden');ui.avisoChegada.classList.add('hidden');}
   salvar();desenharMarcadores();atualizarLinha();
 }
 function alternarConcluida(id) {
+  destinosAvisados.delete(id);
   paradas=paradas.map(p=>p.id===id?{...p,concluida:!p.concluida}:p);
   renderizar();
 }
@@ -633,13 +809,17 @@ function custoSequencia(indices,matriz) {
   }
   return soma;
 }
-function heuristicaCom2Opt(matriz) {
+function heuristicaCom2Opt(matriz,pontos) {
   // Caminho aberto: começa na origem (índice 0), não precisa retornar ao depósito.
   const restantes=Array.from({length:matriz.length-1},(_,i)=>i+1), ordem=[];
   let atual=0;
   while(restantes.length){
     let pos=0,menor=Infinity;
-    restantes.forEach((i,k)=>{const d=matriz[atual][i];if(Number.isFinite(d)&&d<menor){menor=d;pos=k;}});
+    const comPrioridade=restantes.some(i=>Boolean(pontos[i]?.urgente));
+    restantes.forEach((i,k)=>{
+      if(comPrioridade&&!pontos[i]?.urgente)return;
+      const d=matriz[atual][i];if(Number.isFinite(d)&&d<menor){menor=d;pos=k;}
+    });
     const [escolhido]=restantes.splice(pos,1);ordem.push(escolhido);atual=escolhido;
   }
   let melhor=custoSequencia(ordem,matriz);
@@ -649,6 +829,10 @@ function heuristicaCom2Opt(matriz) {
     let ganho=false;
     for(let i=0;i<ordem.length-1;i++)for(let j=i+1;j<ordem.length;j++){
       const candidata=[...ordem.slice(0,i),...ordem.slice(i,j+1).reverse(),...ordem.slice(j+1)];
+      // Priorizadas permanecem antes das demais, mesmo após inversão.
+      let viuNormal=false,prioridadeAtrasada=false;
+      for(const idx of candidata){if(!pontos[idx]?.urgente)viuNormal=true;else if(viuNormal){prioridadeAtrasada=true;break;}}
+      if(prioridadeAtrasada)continue;
       const custo=custoSequencia(candidata,matriz);
       if(custo+0.1<melhor){ordem.splice(0,ordem.length,...candidata);melhor=custo;ganho=true;}
     }
@@ -659,7 +843,7 @@ function heuristicaCom2Opt(matriz) {
 async function buscarMatriz(pontos) {
   const coords=pontos.map(p=>`${p.lon},${p.lat}`).join(';');
   const url=`${CONFIG.osrm}/table/v1/driving/${coords}?annotations=duration`;
-  const resposta=await fetch(url);
+  const resposta=await fetchComTimeout(url,{timeout:CONFIG.limiteTempoRotaMs});
   if(!resposta.ok)throw new Error('Não foi possível consultar as ruas.');
   const data=await resposta.json();
   if(data.code!=='Ok'||!Array.isArray(data.durations)||data.durations.length!==pontos.length)
@@ -672,7 +856,7 @@ async function buscarMatriz(pontos) {
 async function buscarTrajeto(pontos) {
   const coords=pontos.map(p=>`${p.lon},${p.lat}`).join(';');
   const url=`${CONFIG.osrm}/route/v1/driving/${coords}?overview=full&geometries=geojson&steps=false`;
-  const resposta=await fetch(url);
+  const resposta=await fetchComTimeout(url,{timeout:CONFIG.limiteTempoRotaMs});
   if(!resposta.ok)throw new Error('Trajeto indisponível');
   const data=await resposta.json();
   if(data.code!=='Ok'||!data.routes?.[0]?.geometry?.coordinates?.length) throw new Error('Trajeto não encontrado');
@@ -680,11 +864,13 @@ async function buscarTrajeto(pontos) {
 }
 ui.btnOtimizar.addEventListener('click',async()=>{
   const pendentes=paradas.filter(p=>!p.concluida);
+  if(otimizacaoEmCurso)return;
   if(!pendentes.length){statusPlano('Adicione ao menos uma entrega antes de otimizar.','alerta');return;}
   if(pendentes.length+1>CONFIG.maxPontosRoteamento){
     statusPlano(`Para evitar erros, otimize em grupos de até ${CONFIG.maxPontosRoteamento-1} entregas.`,'alerta');return;
   }
-  const assinatura=chaveDaRota();
+  const assinatura=assinaturaCalculo();
+  otimizacaoEmCurso=true;
   const pontos=[origem,...pendentes];
   busy(ui.btnOtimizar,true,'Calculando...');
   ui.mapaLoading.classList.remove('hidden');
@@ -693,20 +879,32 @@ ui.btnOtimizar.addEventListener('click',async()=>{
   try {
     try { matriz=await buscarMatriz(pontos); }
     catch(e) {console.warn('Matriz rodoviária:',e);matriz=matrizGeografica(pontos);modo='aproximado';}
-    indices=heuristicaCom2Opt(matriz);
-    if(chaveDaRota()!==assinatura)throw new Error('A lista foi alterada. Clique em otimizar novamente.');
+    indices=heuristicaCom2Opt(matriz,pontos);
+    if(assinaturaCalculo()!==assinatura)throw new Error('A lista foi alterada. Clique em otimizar novamente.');
     const novasPendentes=indices.map(i=>pendentes[i-1]);
     const pontosOrdenados=[origem,...novasPendentes];
+    let trajetoCalculado=null;
     let geometria=pontosOrdenados.map(p=>[p.lon,p.lat]);
     let km=null,min=null,linhaAproximada=true;
     try {
-      const rota=await buscarTrajeto(pontosOrdenados);
+      const rota=await buscarTrajeto(pontosOrdenados);trajetoCalculado=rota;
       geometria=rota.geometry.coordinates;
       km=rota.distance/1000;min=rota.duration/60;linhaAproximada=false;
     } catch(e) {console.warn('Traçado pelas ruas:',e);}
-    if(chaveDaRota()!==assinatura)throw new Error('A lista mudou durante o cálculo. Otimize novamente.');
+    if(assinaturaCalculo()!==assinatura)throw new Error('A lista mudou durante o cálculo. Otimize novamente.');
     let i=0;paradas=paradas.map(p=>p.concluida?p:novasPendentes[i++]);
-    planejamento={chave:chaveDaRota(),coordenadas:geometria,km,min,linhaAproximada,modo};
+    // Estimativa acumulada por parada, incluindo tempo opcional de atendimento.
+    const etaPorId={};let acumulado=0,anteriorIndice=0;
+    novasPendentes.forEach((parada,i)=>{
+      const indiceOriginal=indices[i];
+      const duracao=trajetoCalculado?.legs?.[i]?.duration;
+      acumulado+=(Number.isFinite(duracao)?duracao:matriz[anteriorIndice]?.[indiceOriginal]||0)/60;
+      etaPorId[parada.id]=Math.round(acumulado);
+      acumulado+=parada.tempoParada||0;
+      anteriorIndice=indiceOriginal;
+    });
+    if(Number.isFinite(min))min+=novasPendentes.reduce((s,p)=>s+(p.tempoParada||0),0);
+    planejamento={chave:chaveDaRota(),coordenadas:geometria,km,min,linhaAproximada,modo,etaPorId};
     renderizar();
     if(modo==='aproximado'||linhaAproximada)
       statusPlano('Sequência calculada. Parte do percurso é aproximada; confira o mapa antes de sair.','alerta');
@@ -716,19 +914,24 @@ ui.btnOtimizar.addEventListener('click',async()=>{
     console.warn('Otimização falhou:',e);
     statusPlano(e.message||'Não foi possível otimizar a rota agora.','alerta');
   } finally {
+    otimizacaoEmCurso=false;
     busy(ui.btnOtimizar,false);
     ui.mapaLoading.classList.add('hidden');
+    ui.btnOtimizar.disabled=!paradas.some(p=>!p.concluida);
+    ui.btnComecar.disabled=!rotaOtimizada()||!paradas.some(p=>!p.concluida);
   }
 });
 
 // ---------- PONTO DE PARTIDA ----------
 async function salvarOrigemDigitada() {
   const texto=ui.inputOrigem.value.trim();
+  if(ui.btnSalvarOrigem.disabled) return;
   if(!texto){aviso('Digite seu endereço de partida ou use o GPS.',true);return;}
   busy(ui.btnSalvarOrigem,true,'Localizando...');
   try {
     const leitura=interpretarEndereco(texto);
     const p=await geocodificarRevisado(leitura);
+    if(ui.inputOrigem.value.trim()!==texto) { aviso('Origem alterada. Confirme novamente o endereço.'); return; }
     if(!p)throw new Error('Não encontramos o ponto de partida. Confira rua e cidade ou use o GPS.');
     if(leitura.numero&&!p.exato&&!confirm('O número do ponto de partida não foi confirmado. Usar localização aproximada?'))return;
     origem={endereco:texto,lat:p.lat,lon:p.lon,personalizado:true};
@@ -784,8 +987,25 @@ function atualizarGPS(forcar=false) {
     ? `Último sinal do GPS há ${segundos}s · precisão ±${Math.round(p.accuracy)} m`
     : `GPS ativo · precisão ±${Math.round(p.accuracy)} m`;
 }
+function verificarChegadaGPS(p) {
+  if(!rotaIniciada||!rotaOtimizada()||!p)return;
+  const destino=paradas.find(x=>!x.concluida);
+  if(!destino||destinosAvisados.has(destino.id))return;
+  // Leituras antigas ou imprecisas não devem provocar falso gatilho de 10m.
+  if(Date.now()-p.time>12000||!Number.isFinite(p.accuracy)||p.accuracy>CONFIG.gpsPrecisaoMaxima)return;
+  const d=distanciaMetros(p,destino);
+  const limite=destino.precisao==='aproximado'?30:CONFIG.raioChegadaMetros;
+  if(d>limite)return;
+  destinosAvisados.add(destino.id);
+  // Só termina o acompanhamento deste destino. Não temos controle sobre Waze/Google Maps.
+  renderizar();
+  ui.gpsStatus.textContent=destino.precisao==='aproximado'
+    ?'Você está perto do ponto estimado na rua. Confira o imóvel.'
+    :'Destino alcançado! Confirme a entrega quando concluir.';
+}
 function pararGPS() {
-  if(gpsWatchId!==null)navigator.geolocation.clearWatch(gpsWatchId);gpsWatchId=null;
+  gpsVersao++;
+  if(gpsWatchId!==null && navigator.geolocation)navigator.geolocation.clearWatch(gpsWatchId);gpsWatchId=null;
   if(gpsTimer!==null)clearInterval(gpsTimer);gpsTimer=null;
   ultimaPosicaoGPS=null;instanteExibidoGPS=0;
   if(marcadorGPS)marcadorGPS.remove();marcadorGPS=null;
@@ -797,16 +1017,20 @@ function pararGPS() {
 function iniciarGPS() {
   if(!navigator.geolocation){aviso('Seu dispositivo não tem suporte a GPS.',true);return;}
   if(!window.isSecureContext){aviso('O GPS precisa de conexão HTTPS ou localhost.',true);return;}
+  const versao=++gpsVersao;
   acompanharGPS=true;
   ui.btnGpsLive.setAttribute('aria-pressed','true');
   ui.btnGpsLive.innerHTML='<span class="gps-mini-dot"></span><span><i class="fa-solid fa-stop"></i> Parar GPS</span>';
   ui.btnCentralizarGps.classList.remove('hidden');
   ui.gpsStatus.classList.remove('hidden');ui.gpsStatus.textContent='Procurando sua localização...';
   gpsWatchId=navigator.geolocation.watchPosition(pos=>{
+    if(versao!==gpsVersao)return;
     ultimaPosicaoGPS={lat:pos.coords.latitude,lon:pos.coords.longitude,
       accuracy:pos.coords.accuracy,time:pos.timestamp||Date.now()};
+    verificarChegadaGPS(ultimaPosicaoGPS);
     if(!instanteExibidoGPS)atualizarGPS(true);
   },e=>{
+    if(versao!==gpsVersao)return;
     ui.gpsStatus.textContent=mensagemGPS(e);
     if(e.code===1){pararGPS();aviso(mensagemGPS(e),true);}
   },{enableHighAccuracy:true,maximumAge:0,timeout:15000});
@@ -840,3 +1064,11 @@ ui.inputOrigem.value=origem.personalizado?origem.endereco:'';
 ui.labelOrigem.textContent=origem.personalizado?'Origem definida':'São José dos Campos';
 if(origem.personalizado)ui.ajudaOrigem.textContent='Seu ponto de partida foi salvo neste navegador.';
 renderizar();
+// Fallback apenas para a folha de estilos do mapa; não precisa de configuração do usuário.
+const mapaCss = document.getElementById('maplibre-css');
+if (mapaCss) mapaCss.addEventListener('error', () => {
+  if (!mapaCss.href.includes('jsdelivr.net'))
+    mapaCss.href = 'https://cdn.jsdelivr.net/npm/maplibre-gl@6.3.0/dist/maplibre-gl.css';
+});
+// Carrega o mapa sem bloquear a lista, os campos nem a otimização se a CDN estiver indisponível.
+iniciarMapa();

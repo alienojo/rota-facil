@@ -7,7 +7,7 @@
   <meta name="description" content="RotaFácil: adicione seus destinos, organize o melhor caminho e acompanhe suas entregas.">
   <title>RotaFácil — Planeje menos. Entregue mais.</title>
   <link rel="preconnect" href="https://tiles.openfreemap.org">
-  <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@6.3.0/dist/maplibre-gl.css">
+  <link id="maplibre-css" rel="stylesheet" href="https://unpkg.com/maplibre-gl@6.3.0/dist/maplibre-gl.css">
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
   <link rel="stylesheet" href="style.css">
 </head>
@@ -51,7 +51,7 @@
           </div>
           <div class="hero-insights" aria-label="Resumo do percurso">
             <div class="hero-insight"><span><i class="fa-solid fa-route"></i> DISTÂNCIA</span><strong id="hero-distancia">—</strong><small>percurso estimado</small></div>
-            <div class="hero-insight"><span><i class="fa-regular fa-clock"></i> TEMPO</span><strong id="hero-tempo">—</strong><small>sem trânsito e paradas</small></div>
+            <div class="hero-insight"><span><i class="fa-regular fa-clock"></i> TEMPO</span><strong id="hero-tempo">—</strong><small>sem trânsito em tempo real</small></div>
             <div class="hero-insight"><span><i class="fa-solid fa-box"></i> ENTREGAS</span><strong id="hero-pendentes">0</strong><small>paradas pendentes</small></div>
           </div>
         </div>
@@ -72,7 +72,7 @@
               <button id="btn-ajustar-mapa" class="tool-btn tool-icon" type="button" title="Mostrar todos os pontos" aria-label="Mostrar todos os pontos"><i class="fa-solid fa-expand"></i></button>
             </div>
           </div>
-          <div class="map-viewport"><div id="map" role="application" aria-label="Mapa interativo com seus endereços"></div>
+          <div class="map-viewport"><div id="map" role="region" aria-label="Mapa interativo com seus endereços"></div>
             <div id="map-loading" class="map-loading hidden" role="status"><i class="fa-solid fa-spinner fa-spin"></i> Calculando percurso...</div>
             <span id="map-hint" class="map-hint">Os pinos aparecem quando você adiciona endereços.</span>
           </div>
@@ -90,6 +90,7 @@
         <div id="painel-bola-da-vez" class="next-card hidden" aria-label="Próxima entrega">
           <div class="next-overline"><i class="fa-solid fa-bolt"></i> PRÓXIMA ENTREGA <span id="progresso-rota">0 de 0 concluídas</span></div>
           <div class="next-line"><span id="numero-bola-da-vez" class="next-number">01</span><strong id="endereco-bola-da-vez">—</strong></div>
+          <p id="aviso-chegada" class="arrival-notice hidden" role="status" aria-live="assertive"></p>
           <div class="next-actions"><a id="btn-navegar-ativa" class="btn btn-lime" href="#" target="_blank" rel="noopener noreferrer"><i class="fa-solid fa-diamond-turn-right"></i> Abrir navegação</a><button id="btn-concluir-ativa" class="btn btn-hero-outline" type="button"><i class="fa-solid fa-check"></i> Entregue</button></div>
         </div>
       </section>
@@ -97,7 +98,7 @@
       <section class="page-section" id="nova-entrega" aria-labelledby="titulo-endereco">
         <div class="section-heading"><div><span class="eyebrow">02 / PARADAS</span><h2 id="titulo-endereco">Adicionar uma entrega</h2></div><span class="section-helper">Pesquise → confirme → adicione</span></div>
         <div class="surface address-surface">
-          <div class="surface-header"><span class="circle-icon"><i class="fa-solid fa-map-pin"></i></span><div><h3>Para onde você vai?</h3><p>Digite rua e número. Escolha o endereço e confira antes de salvar.</p></div></div>
+          <div class="surface-header"><span class="circle-icon"><i class="fa-solid fa-map-pin"></i></span><div><h3>Para onde você vai?</h3><p>Digite rua e número. Confirme o endereço; o aplicativo encontra a posição na rua.</p></div></div>
           <form id="form-parada" autocomplete="off">
             <label for="input-endereco" class="field-label">ENDEREÇO DA ENTREGA</label>
             <div class="search-row"><div class="search-area"><i class="fa-solid fa-magnifying-glass search-icon"></i><input id="input-endereco" type="text" required minlength="3" autocomplete="off" role="combobox" aria-controls="sugestoes-endereco" aria-expanded="false" aria-autocomplete="list" placeholder="Ex.: Rua Votuporanga 264, Bosque dos Eucaliptos"><span id="search-spinner" class="search-spinner hidden"><i class="fa-solid fa-spinner fa-spin"></i></span><div id="sugestoes-endereco" class="suggestions hidden" role="listbox" aria-label="Sugestões de endereços"></div></div>
@@ -118,9 +119,17 @@
                 <label>UF<input id="review-uf" maxlength="2" required placeholder="SP"></label>
                 <label>CEP (opcional)<input id="review-cep" placeholder="00000-000" inputmode="numeric"></label>
               </div>
+              <details class="extras-entrega">
+                <summary><i class="fa-solid fa-box"></i> Detalhes da entrega (opcional) <i class="fa-solid fa-chevron-down"></i></summary>
+                <div class="extras-grid">
+                  <label>Observações / pacote<input id="review-notas" maxlength="200" placeholder="Ex.: Portaria B, pacote frágil"></label>
+                  <label class="check-extra"><input id="review-prioridade" type="checkbox"> <span>Entrega prioritária</span></label>
+                  <label>Tempo no local (min)<input id="review-tempo" type="number" min="0" max="120" step="1" value="0"></label>
+                </div>
+              </details>
               <div id="resultado-precisao" class="accuracy-message" role="status" aria-live="polite"><i class="fa-solid fa-circle-info"></i><span>Confira os campos para continuar.</span></div>
-              <div class="review-actions"><button id="btn-confirmar-endereco" class="btn btn-lime" type="submit"><i class="fa-solid fa-check"></i> OK, confirmar</button><button id="btn-editar-endereco" class="btn btn-soft" type="button"><i class="fa-solid fa-pen"></i> Editar</button><button id="btn-marcar-mapa" class="btn btn-outline" type="button"><i class="fa-solid fa-location-crosshairs"></i> Marcar no mapa</button></div>
-              <div id="aproximacao-acoes" class="approx-actions hidden"><p><i class="fa-solid fa-triangle-exclamation"></i> O número não foi encontrado com segurança. Escolha o local no mapa ou salve sabendo que a localização é aproximada.</p><button id="btn-salvar-aproximado" class="btn btn-warning" type="button">Salvar aproximado</button></div>
+              <div class="review-actions"><button id="btn-confirmar-endereco" class="btn btn-lime" type="submit"><i class="fa-solid fa-check"></i> OK, confirmar</button><button id="btn-editar-endereco" class="btn btn-soft" type="button"><i class="fa-solid fa-pen"></i> Editar</button></div>
+
             </form>
           </div>
         </div>

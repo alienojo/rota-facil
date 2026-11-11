@@ -1,4 +1,4 @@
-/* RotaFácil 2026 / V5 — foco na rota, poucas decisões e interface limpa */
+/* RotaFácil 2026 / V6 — foco na rota, poucas decisões e interface limpa */
 :root {
   --ink:#102c28;--ink-dark:#0b211f;--ink-soft:#255147;
   --lime:#ddfb83;--lime-strong:#c8f25c;--bg:#f3f6f1;--paper:#fff;
@@ -217,8 +217,6 @@ input::placeholder {color:#9aac9f}
 .gps-ponto::after {animation-delay:1s}
 .preview-pin {background:#e2a744;border:3px solid #fff;color:#fff;width:37px;height:37px;border-radius:50% 50% 50% 0;transform:rotate(-45deg);display:grid;place-items:center;box-shadow:0 5px 16px #98592a55}
 .preview-pin i {transform:rotate(45deg)}
-body.modo-marcar-mapa #map {cursor:crosshair!important}
-body.modo-marcar-mapa .map-viewport {outline:4px solid #e5b65b;outline-offset:-4px}
 @keyframes blink {50%{opacity:.4}}
 @keyframes pulse {from{transform:scale(.5);opacity:.9}to{transform:scale(2.5);opacity:0}}
 @keyframes appear {from{opacity:0;transform:translateY(7px)}to{opacity:1;transform:translateY(0)}}
@@ -275,3 +273,37 @@ body.modo-marcar-mapa .map-viewport {outline:4px solid #e5b65b;outline-offset:-4
   .footer {align-items:flex-start;flex-direction:column;gap:5px}
 }
 @media(prefers-reduced-motion:reduce){*,*::before,*::after{scroll-behavior:auto!important;transition-duration:.01ms!important;animation-duration:.01ms!important}}
+
+/* Ajustes da auditoria: larguras estreitas, áreas tocáveis e foco acessível. */
+.hero-insight { min-width:0; }
+.hero-insight strong { overflow-wrap:anywhere; white-space:normal; }
+.map-top-actions { flex-wrap:wrap; min-width:0; }
+.search-area, .search-row, .origin-input-row { min-width:0; }
+.suggestion:focus-visible, .stop-action:focus-visible, .tool-btn:focus-visible,
+.icon-btn:focus-visible { outline:3px solid #75bb90; outline-offset:2px; }
+@media(max-width:360px) {
+  .hero-insights { grid-template-columns:repeat(3,minmax(0,1fr)); }
+  .hero-insight { padding:10px 6px; }
+  .hero-insight strong { font-size:15px; letter-spacing:-.3px; }
+  .map-top-actions { row-gap:7px; }
+  .search-row .btn { min-width:0; }
+  .review-fields { gap:8px; }
+  .metric-card { padding:13px 10px; }
+}
+
+/* V6: extras opcionais, indicador de chegada e controles compactos de navegação. */
+.extras-entrega{margin:13px 0 14px;background:#f8fbf6;border:1px solid #dce9dc;border-radius:12px;padding:12px 14px}
+.extras-entrega summary{cursor:pointer;font-size:12px;font-weight:800;color:#37604a;display:flex;align-items:center;gap:9px;list-style:none}
+.extras-entrega summary::-webkit-details-marker{display:none}
+.extras-entrega summary i:last-child{margin-left:auto;font-size:10px;transition:transform .2s}
+.extras-entrega[open] summary i:last-child{transform:rotate(180deg)}
+.extras-grid{display:grid;grid-template-columns:1.5fr .8fr 1fr;gap:12px;align-items:end;margin-top:15px}
+.extras-grid label{font-size:11px;font-weight:700;color:#527260;display:flex;flex-direction:column;gap:6px;min-width:0}
+.extras-grid input:not([type=checkbox]){font:inherit;font-size:12px;border:1px solid #ccdcca;background:white;border-radius:10px;padding:10px;min-width:0;width:100%;outline-color:#2f806e}
+.extras-grid .check-extra{flex-direction:row;align-items:center;gap:8px;padding-bottom:10px}
+.extras-grid input[type=checkbox]{accent-color:#1f7761;width:17px;height:17px}
+.stop-note{color:#577361!important;background:#f1f6ee;border-radius:7px;padding:6px 8px}
+.stop-action.waze{background:#eff5ff;color:#3c75a1}
+.arrival-notice{margin:12px 0 0;border-radius:11px;background:#d5f5c7;color:#254f36;font-size:12px;font-weight:800;padding:12px 14px}
+@media(max-width:660px){.extras-grid{grid-template-columns:1fr 1fr}.extras-grid label:first-child{grid-column:1/-1}}
+@media(max-width:360px){.extras-grid{grid-template-columns:1fr}.extras-grid label:first-child{grid-column:auto}}
