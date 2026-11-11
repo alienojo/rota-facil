@@ -3,144 +3,192 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta name="theme-color" content="#0f172a">
-    <title>RotaFácil — Gestão de entregas</title>
+    <meta name="theme-color" content="#102b29">
+    <meta name="description" content="RotaFácil — seu painel inteligente para planejar e acompanhar entregas.">
+    <title>RotaFácil — Seu caminho, mais simples</title>
 
-    <script src="https://cdn.tailwindcss.com"></script>
-    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@6.3.0/dist/maplibre-gl.css">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <link rel="stylesheet" href="style.css">
 </head>
-<body class="bg-slate-950 text-slate-100 min-h-screen">
-    <header class="sticky top-0 z-50 border-b border-slate-800 bg-slate-900/95 backdrop-blur">
-        <div class="mx-auto flex max-w-6xl items-center justify-between gap-3 px-4 py-4">
-            <div>
-                <h1 class="flex items-center gap-2 text-xl font-extrabold">
-                    <i class="fa-solid fa-route text-emerald-400"></i> RotaFácil
-                </h1>
-                <p class="mt-0.5 text-xs text-slate-400">Organize suas entregas em um só lugar</p>
-            </div>
-            <span id="contador-paradas" class="rounded-full bg-slate-800 px-3 py-1.5 text-xs font-semibold text-slate-300">0 paradas</span>
-        </div>
-    </header>
+<body>
+    <div class="app-shell">
+        <aside class="sidebar" aria-label="Navegação principal">
+            <a class="brand" href="#inicio" aria-label="RotaFácil — início">
+                <span class="brand-symbol" aria-hidden="true">
+                    <svg viewBox="0 0 48 48" width="33" height="33" fill="none" xmlns="http://www.w3.org/2000/svg">
+                        <path d="M11 33.5V13.5C11 11.6 12.6 10 15 10H29.5C34.3 10 38 13.4 38 18.2C38 23.1 34.4 26.5 29.5 26.5H22" stroke="currentColor" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round"/>
+                        <path d="M24 37L34 27L24 17" stroke="currentColor" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round"/>
+                    </svg>
+                </span>
+                <span class="brand-wordmark"><strong>RotaFácil<span class="brand-period">.</span></strong><small>DELIVERY WORKSPACE</small></span>
+            </a>
 
-    <main class="mx-auto grid max-w-6xl gap-5 p-4 pb-12 lg:grid-cols-[minmax(0,1.1fr)_minmax(360px,.9fr)]">
-        <section class="space-y-4">
-            <div class="panel relative overflow-hidden">
-                <div class="flex items-center justify-between gap-3 border-b border-slate-700/70 px-4 py-3">
-                    <div>
-                        <h2 class="font-bold">Mapa da rota</h2>
-                        <p id="status-mapa" class="mt-0.5 text-xs text-slate-400">Adicione paradas para visualizar o percurso</p>
-                    </div>
-                    <button id="btn-ajustar-mapa" type="button" class="icon-button" title="Enquadrar todos os pontos" aria-label="Enquadrar mapa">
-                        <i class="fa-solid fa-expand"></i>
-                    </button>
-                </div>
-                <div id="map" class="h-[360px] w-full sm:h-[440px]"></div>
-                <div id="map-loading" class="pointer-events-none absolute bottom-3 left-3 hidden rounded-lg bg-slate-950/90 px-3 py-2 text-xs text-emerald-300 shadow-lg">
-                    <i class="fa-solid fa-spinner fa-spin mr-1"></i> Atualizando percurso...
-                </div>
-            </div>
+            <div class="sidebar-section-caption">MENU PRINCIPAL</div>
+            <nav class="side-nav" aria-label="Seções do aplicativo">
+                <a class="nav-link is-active" href="#inicio"><i class="fa-solid fa-grip" aria-hidden="true"></i> <span>Visão geral</span><span class="nav-accent"></span></a>
+                <a class="nav-link" href="#mapa"><i class="fa-solid fa-map" aria-hidden="true"></i> <span>Mapa ao vivo</span></a>
+                <a class="nav-link" href="#nova-entrega"><i class="fa-solid fa-circle-plus" aria-hidden="true"></i> <span>Nova entrega</span></a>
+                <a class="nav-link" href="#entregas"><i class="fa-solid fa-boxes-stacked" aria-hidden="true"></i> <span>Minhas paradas</span></a>
+                <a class="nav-link" href="#origem"><i class="fa-solid fa-location-crosshairs" aria-hidden="true"></i> <span>Ponto de partida</span></a>
+            </nav>
 
-            <div id="painel-bola-da-vez" class="hidden rounded-2xl border border-emerald-500/40 bg-gradient-to-r from-emerald-950/80 to-slate-900 p-4 shadow-xl">
-                <div class="mb-3 flex items-center justify-between gap-3">
-                    <span class="text-xs font-bold uppercase tracking-widest text-emerald-300">
-                        <i class="fa-solid fa-bullseye mr-1"></i> Próxima entrega
-                    </span>
-                    <span id="progresso-rota" class="text-xs text-slate-400">0 de 0 concluídas</span>
+            <div class="sidebar-bottom">
+                <div class="sidebar-tip">
+                    <span class="sidebar-tip-icon"><i class="fa-solid fa-bolt" aria-hidden="true"></i></span>
+                    <strong>Mais rota.<br>Menos complicação.</strong>
+                    <p>Planeje cada parada com clareza e siga seu dia.</p>
                 </div>
-                <div class="flex items-start gap-3">
-                    <span id="numero-bola-da-vez" class="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-emerald-400 font-extrabold text-slate-950">1</span>
-                    <p id="endereco-bola-da-vez" class="pt-1 text-sm font-semibold leading-relaxed"></p>
-                </div>
-                <div class="mt-4 flex gap-2">
-                    <a id="btn-navegar-ativa" href="#" target="_blank" rel="noopener noreferrer" class="primary-button flex-1">
-                        <i class="fa-solid fa-location-arrow"></i> Navegar
-                    </a>
-                    <button id="btn-concluir-ativa" type="button" class="secondary-button">
-                        <i class="fa-solid fa-check"></i> Entregue
-                    </button>
-                </div>
+                <div class="sidebar-version"><span class="version-dot"></span> RotaFácil / Edição 2026</div>
             </div>
+        </aside>
 
-            <section class="panel p-4">
-                <div class="mb-3 flex items-center justify-between gap-3">
-                    <div>
-                        <h2 class="font-bold">Ponto de partida</h2>
-                        <p class="text-xs text-slate-400">De onde sua rota deve começar?</p>
-                    </div>
-                    <span id="label-status-origem" class="status-pill">Origem padrão</span>
+        <div class="workspace" id="inicio">
+            <header class="page-header">
+                <a class="mobile-brand" href="#inicio" aria-label="RotaFácil — início">
+                    <span class="mobile-brand-mark"><i class="fa-solid fa-route" aria-hidden="true"></i></span>
+                    RotaFácil<span class="brand-period">.</span>
+                </a>
+                <div class="page-header-copy">
+                    <div class="eyebrow"><span class="eyebrow-line"></span> SEU PAINEL DE ENTREGAS</div>
+                    <h1>Seu caminho, <span>mais simples.</span></h1>
+                    <p>Uma visão inteligente de cada parada, do início ao destino.</p>
                 </div>
-                <div class="flex flex-col gap-2 sm:flex-row">
-                    <input id="input-origem" type="text" autocomplete="off" placeholder="Ex.: Rua, número, bairro e cidade" class="field min-w-0 flex-1">
-                    <div class="flex gap-2">
-                        <button id="btn-salvar-origem" type="button" class="secondary-button flex-1 sm:flex-none">
-                            <i class="fa-solid fa-location-dot"></i> Definir
-                        </button>
-                        <button id="btn-gps-atual" type="button" class="secondary-button flex-1 sm:flex-none" title="Usar localização atual">
-                            <i class="fa-solid fa-crosshairs"></i> GPS
-                        </button>
-                    </div>
+                <div class="header-identity">
+                    <span class="identity-indicator"><span class="identity-dot"></span> Espaço de trabalho</span>
+                    <span class="identity-avatar" aria-hidden="true">RF</span>
                 </div>
-                <p id="ajuda-origem" class="mt-2 text-xs text-slate-500">A origem padrão é São José dos Campos (SP). Você pode alterá-la a qualquer momento.</p>
+            </header>
+
+            <section class="metrics-grid" aria-label="Resumo das entregas">
+                <article class="metric-card metric-total">
+                    <div class="metric-top"><span>Total de paradas</span><span class="metric-icon"><i class="fa-solid fa-layer-group" aria-hidden="true"></i></span></div>
+                    <div class="metric-value" id="metric-total">00</div>
+                    <div class="metric-foot">Na sua rota atual</div>
+                </article>
+                <article class="metric-card">
+                    <div class="metric-top"><span>Pendentes</span><span class="metric-icon metric-icon-coral"><i class="fa-solid fa-clock" aria-hidden="true"></i></span></div>
+                    <div class="metric-value" id="metric-pendentes">00</div>
+                    <div class="metric-foot">Aguardando entrega</div>
+                </article>
+                <article class="metric-card">
+                    <div class="metric-top"><span>Concluídas</span><span class="metric-icon metric-icon-blue"><i class="fa-solid fa-check-double" aria-hidden="true"></i></span></div>
+                    <div class="metric-value" id="metric-concluidas">00</div>
+                    <div class="metric-foot">Entregas finalizadas</div>
+                </article>
+                <article class="metric-card metric-progress">
+                    <div class="metric-top"><span>Progresso da rota</span><span class="metric-icon metric-icon-lime"><i class="fa-solid fa-chart-simple" aria-hidden="true"></i></span></div>
+                    <div class="metric-value" id="metric-progress">0%</div>
+                    <div class="progress-track" role="progressbar" aria-label="Progresso das entregas" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="progress-track"><span id="progress-bar"></span></div>
+                </article>
             </section>
-        </section>
 
-        <section class="space-y-4">
-            <form id="form-parada" class="panel relative z-20 space-y-3 p-4">
-                <div>
-                    <h2 class="font-bold">Adicionar entrega</h2>
-                    <p class="text-xs text-slate-400">Digite o endereço e escolha uma sugestão para maior precisão.</p>
-                </div>
-                <div class="relative">
-                    <label for="input-endereco" class="mb-1.5 block text-xs font-medium text-slate-300">Endereço da entrega</label>
-                    <input id="input-endereco" type="text" autocomplete="off" required minlength="4" placeholder="Ex.: Rua Votuporanga, 264, São José dos Campos" class="field w-full">
-                    <div id="sugestoes-container" class="suggestions hidden"></div>
-                </div>
-                <div class="flex flex-col gap-2 sm:flex-row">
-                    <button id="btn-adicionar" type="submit" class="primary-button flex-1">
-                        <i class="fa-solid fa-plus"></i> Adicionar parada
-                    </button>
-                    <button id="btn-camera" type="button" class="secondary-button">
-                        <i class="fa-solid fa-camera"></i> Ler foto (OCR)
-                    </button>
-                    <input id="input-file-camera" type="file" accept="image/*" capture="environment" class="hidden">
-                </div>
-                <p id="status-formulario" role="status" aria-live="polite" class="min-h-4 text-xs text-slate-400"></p>
-            </form>
+            <main class="dashboard-grid">
+                <div class="map-column">
+                    <section class="surface-card map-card" id="mapa" aria-label="Mapa do trajeto">
+                        <div class="card-header map-header">
+                            <div>
+                                <div class="section-kicker"><span class="section-kicker-dot"></span> SUA ROTA NO MAPA</div>
+                                <h2>Mapa de entregas <span class="title-spark">✳</span></h2>
+                            </div>
+                            <div class="map-tools">
+                                <button id="btn-gps-live" type="button" class="gps-live-button" aria-pressed="false" title="Iniciar ou parar GPS ao vivo"><span class="gps-mini-dot"></span><span><i class="fa-solid fa-satellite-dish" aria-hidden="true"></i> GPS ao vivo</span></button>
+                                <button id="btn-centralizar-gps" type="button" class="tool-button hidden" title="Voltar a acompanhar o GPS" aria-label="Acompanhar localização GPS"><i class="fa-solid fa-crosshairs" aria-hidden="true"></i></button>
+                                <button id="btn-ajustar-mapa" type="button" class="tool-button" title="Enquadrar todas as entregas" aria-label="Enquadrar todas as entregas"><i class="fa-solid fa-expand" aria-hidden="true"></i></button>
+                            </div>
+                        </div>
+                        <div class="map-viewport">
+                            <div class="map-placeholder" aria-hidden="true"><i class="fa-solid fa-map-location-dot"></i><span>Preparando o mapa...</span></div>
+                            <div id="map" aria-label="Mapa interativo das entregas"></div>
+                            <div id="gps-status" class="gps-map-bubble hidden" aria-live="polite"></div>
+                            <div id="map-loading" class="map-loading hidden" aria-live="polite"><i class="fa-solid fa-spinner fa-spin" aria-hidden="true"></i> Calculando percurso...</div>
+                            <div class="map-watermark" aria-hidden="true">R<span>✳</span>F</div>
+                        </div>
+                        <div class="map-footer">
+                            <div class="route-summary"><span class="summary-dot"></span><span id="status-mapa" aria-live="polite">Adicione paradas para visualizar o percurso</span></div>
+                            <div class="legend"><span><i class="legend-dot legend-origin"></i> Origem</span><span><i class="legend-dot legend-stop"></i> Parada</span><span><i class="legend-dot legend-gps"></i> GPS</span></div>
+                        </div>
+                    </section>
 
-            <div class="grid grid-cols-2 gap-2">
-                <button id="btn-comecar-rota" type="button" class="primary-button">
-                    <i class="fa-solid fa-play"></i> Iniciar rota
-                </button>
-                <button id="btn-otimizar" type="button" class="secondary-button">
-                    <i class="fa-solid fa-wand-magic-sparkles"></i> Otimizar
-                </button>
-            </div>
+                    <section id="painel-bola-da-vez" class="next-stop-card hidden" aria-label="Próxima entrega">
+                        <div class="next-stop-head">
+                            <span class="next-stop-kicker"><span class="next-stop-kicker-dot"></span> AGORA É A VEZ DESTA ENTREGA</span>
+                            <span id="progresso-rota" class="next-stop-progress">0 de 0 concluídas</span>
+                        </div>
+                        <div class="next-stop-body">
+                            <div class="next-stop-number" id="numero-bola-da-vez">1</div>
+                            <div class="next-stop-info"><span class="next-stop-label">Próxima parada</span><h3 id="endereco-bola-da-vez">—</h3></div>
+                        </div>
+                        <div class="next-stop-actions">
+                            <a id="btn-navegar-ativa" class="btn-lime" href="#" target="_blank" rel="noopener noreferrer"><i class="fa-solid fa-arrow-up-right-from-square" aria-hidden="true"></i> Abrir navegação</a>
+                            <button id="btn-concluir-ativa" class="btn-next-complete" type="button"><i class="fa-solid fa-check" aria-hidden="true"></i> Entregue</button>
+                        </div>
+                    </section>
 
-            <div class="panel p-4">
-                <div class="mb-3 flex items-center justify-between gap-3">
-                    <div>
-                        <h2 class="font-bold">Sequência das entregas</h2>
-                        <p id="resumo-entregas" class="text-xs text-slate-400">Nenhuma parada cadastrada</p>
-                    </div>
-                    <button id="btn-limpar" type="button" class="icon-button text-rose-400" title="Remover entregas concluídas" aria-label="Remover concluídas">
-                        <i class="fa-solid fa-trash-can"></i>
-                    </button>
+                    <section class="surface-card origin-card" id="origem">
+                        <div class="origin-top">
+                            <div class="origin-title"><span class="section-symbol origin-symbol"><i class="fa-solid fa-location-arrow" aria-hidden="true"></i></span><div><span class="section-kicker">DE ONDE VOCÊ SAI?</span><h2>Ponto de partida</h2></div></div>
+                            <span id="label-status-origem" class="origin-state">Origem padrão</span>
+                        </div>
+                        <div class="origin-controls">
+                            <label class="input-shell origin-input" for="input-origem"><i class="fa-solid fa-location-dot" aria-hidden="true"></i><input id="input-origem" type="text" autocomplete="off" placeholder="Rua, número, bairro e cidade" aria-label="Endereço de origem"></label>
+                            <button id="btn-salvar-origem" type="button" class="btn-ink"><i class="fa-solid fa-check" aria-hidden="true"></i> Definir</button>
+                            <button id="btn-gps-atual" type="button" class="btn-subtle" title="Usar minha localização como origem"><i class="fa-solid fa-crosshairs" aria-hidden="true"></i> Meu GPS</button>
+                        </div>
+                        <p id="ajuda-origem" class="hint-text">Origem inicial: São José dos Campos (SP). Você pode alterar quando quiser.</p>
+                    </section>
                 </div>
-                <div id="lista-entregas" class="space-y-3">
-                    <div class="empty-state">Nenhuma parada na rota.</div>
-                </div>
-                <button id="btn-resetar-rota" type="button" class="mt-4 w-full rounded-xl border border-rose-500/30 bg-rose-500/10 px-3 py-2.5 text-xs font-bold text-rose-300 transition hover:bg-rose-500/20">
-                    <i class="fa-solid fa-rotate-right mr-1"></i> Apagar rota e começar outra
-                </button>
-            </div>
-        </section>
-    </main>
 
-    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+                <div class="control-column">
+                    <section class="compose-card" id="nova-entrega">
+                        <div class="compose-deco" aria-hidden="true"><span></span><span></span><span></span></div>
+                        <div class="compose-top"><span class="compose-tag"><i class="fa-solid fa-plus" aria-hidden="true"></i> ADICIONAR ENDEREÇO</span><span class="compose-icon"><i class="fa-solid fa-location-dot" aria-hidden="true"></i></span></div>
+                        <h2>Qual é a<br><em>próxima parada?</em></h2>
+                        <p class="compose-desc">Busque a rua, confira o número e adicione cada destino com confiança.</p>
+                        <form id="form-parada" class="address-form">
+                            <label for="input-endereco">ENDEREÇO DA ENTREGA</label>
+                            <div class="input-shell search-shell"><i class="fa-solid fa-magnifying-glass" aria-hidden="true"></i><input id="input-endereco" type="text" required minlength="4" autocomplete="off" placeholder="Rua, nº, bairro e cidade"></div>
+                            <div class="address-actions">
+                                <button id="btn-adicionar" class="btn-lime" type="submit"><i class="fa-solid fa-magnifying-glass-location" aria-hidden="true"></i> Buscar endereço <i class="fa-solid fa-arrow-right button-arrow" aria-hidden="true"></i></button>
+                                <button id="btn-camera" class="btn-photo" type="button" title="Extrair endereço de uma foto"><i class="fa-solid fa-camera" aria-hidden="true"></i> Ler foto</button>
+                                <input id="input-file-camera" type="file" accept="image/*" capture="environment" class="hidden">
+                            </div>
+                            <div id="resultados-endereco" class="search-results hidden" aria-live="polite"></div>
+                            <button id="btn-marcar-mapa" class="btn-mark-map hidden" type="button"><i class="fa-solid fa-map-pin" aria-hidden="true"></i> Escolher o ponto diretamente no mapa</button>
+                            <p id="status-formulario" class="form-message" role="status" aria-live="polite"></p>
+                            <details class="api-settings"><summary><span><i class="fa-solid fa-sliders" aria-hidden="true"></i> Precisão avançada (Geoapify)</span><i class="fa-solid fa-chevron-down details-arrow" aria-hidden="true"></i></summary>
+                                <p>Para localizar melhor os números dos imóveis, adicione uma chave do Geoapify. Sem chave, a busca limitada do OpenStreetMap funciona quando você toca em “Buscar endereço”.</p>
+                                <div class="api-controls"><input id="input-api-key" type="password" autocomplete="off" placeholder="Chave Geoapify" aria-label="Chave da API Geoapify"><button id="btn-salvar-key" class="btn-api" type="button">Salvar</button></div>
+                                <a href="https://myprojects.geoapify.com/" target="_blank" rel="noopener noreferrer">Obter uma chave <i class="fa-solid fa-arrow-up-right-from-square" aria-hidden="true"></i></a>
+                            </details>
+                        </form>
+                    </section>
+
+                    <section class="surface-card route-controls-card">
+                        <div class="route-controls-title"><div><div class="section-kicker">HORA DE RODAR</div><h2>Controle de rota</h2></div><span id="route-state" class="route-state"><span></span> Não iniciada</span></div>
+                        <div class="route-buttons">
+                            <button id="btn-comecar-rota" class="btn-ink"><i class="fa-solid fa-play" aria-hidden="true"></i> Começar rota</button>
+                            <button id="btn-otimizar" class="btn-outline"><i class="fa-solid fa-wand-magic-sparkles" aria-hidden="true"></i> Otimizar</button>
+                        </div>
+                    </section>
+
+                    <section class="surface-card deliveries-card" id="entregas">
+                        <div class="deliveries-header">
+                            <div><div class="section-kicker">TODAS AS SUAS PARADAS</div><h2>Sequência de entregas</h2><p id="resumo-entregas">Nenhuma parada cadastrada</p></div>
+                            <div class="deliveries-actions"><span id="contador-paradas" class="delivery-count">0 paradas</span><button id="btn-limpar" class="tool-button delete-completed" type="button" title="Remover entregas concluídas" aria-label="Remover entregas concluídas"><i class="fa-solid fa-trash-can" aria-hidden="true"></i></button></div>
+                        </div>
+                        <div id="lista-entregas" class="stops-list" aria-live="polite"><div class="empty-state">Nenhuma parada cadastrada.</div></div>
+                        <button id="btn-resetar-rota" class="reset-link" type="button"><i class="fa-solid fa-arrow-rotate-left" aria-hidden="true"></i> Apagar rota e começar novamente</button>
+                    </section>
+                </div>
+            </main>
+            <footer class="page-footer"><span>© 2026 RotaFácil <span class="footer-dot">✳</span> Feito para simplificar suas entregas.</span><span>Seus dados de rota ficam neste navegador.</span></footer>
+        </div>
+    </div>
     <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
-    <script src="app.js"></script>
+    <script type="module" src="app.js"></script>
 </body>
 </html>
-s
