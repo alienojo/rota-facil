@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#102522">
-  <meta name="description" content="RotaFácil: adicione seus destinos, organize o melhor caminho e acompanhe suas entregas.">
+  <meta name="description" content="RotaFácil: adicione endereços com autocompletar, otimize e acompanhe suas entregas.">
   <title>RotaFácil — Planeje menos. Entregue mais.</title>
   <link rel="preconnect" href="https://tiles.openfreemap.org">
   <link id="maplibre-css" rel="stylesheet" href="https://unpkg.com/maplibre-gl@6.3.0/dist/maplibre-gl.css">
@@ -98,18 +98,18 @@
       <section class="page-section" id="nova-entrega" aria-labelledby="titulo-endereco">
         <div class="section-heading"><div><span class="eyebrow">02 / PARADAS</span><h2 id="titulo-endereco">Adicionar uma entrega</h2></div><span class="section-helper">Pesquise → confirme → adicione</span></div>
         <div class="surface address-surface">
-          <div class="surface-header"><span class="circle-icon"><i class="fa-solid fa-map-pin"></i></span><div><h3>Para onde você vai?</h3><p>Digite rua e número. Confirme o endereço; o aplicativo encontra a posição na rua.</p></div></div>
+          <div class="surface-header"><span class="circle-icon"><i class="fa-solid fa-map-pin"></i></span><div><h3>Para onde você vai?</h3><p>Digite rua e número. Escolha uma sugestão e toque em OK para adicionar.</p></div></div>
           <form id="form-parada" autocomplete="off">
             <label for="input-endereco" class="field-label">ENDEREÇO DA ENTREGA</label>
-            <div class="search-row"><div class="search-area"><i class="fa-solid fa-magnifying-glass search-icon"></i><input id="input-endereco" type="text" required minlength="3" autocomplete="off" role="combobox" aria-controls="sugestoes-endereco" aria-expanded="false" aria-autocomplete="list" placeholder="Ex.: Rua Votuporanga 264, Bosque dos Eucaliptos"><span id="search-spinner" class="search-spinner hidden"><i class="fa-solid fa-spinner fa-spin"></i></span><div id="sugestoes-endereco" class="suggestions hidden" role="listbox" aria-label="Sugestões de endereços"></div></div>
-              <button id="btn-adicionar" class="btn btn-dark" type="submit"><i class="fa-solid fa-magnifying-glass"></i> Buscar</button>
+            <div class="search-row"><div class="search-area"><i class="fa-solid fa-magnifying-glass search-icon"></i><input id="input-endereco" type="text" required minlength="3" autocomplete="off" role="combobox" aria-controls="sugestoes-endereco" aria-expanded="false" aria-autocomplete="list" placeholder="Ex.: Rua Votuporanga 264"><span id="search-spinner" class="search-spinner hidden"><i class="fa-solid fa-spinner fa-spin"></i></span><div id="sugestoes-endereco" class="suggestions hidden" role="listbox" aria-label="Sugestões de endereços"></div></div>
+              <button id="btn-adicionar" class="btn btn-dark" type="submit"><i class="fa-solid fa-arrow-right"></i> Conferir</button>
               <button id="btn-camera" class="btn btn-soft" type="button" title="Ler endereço de fotografia"><i class="fa-solid fa-camera"></i> Foto</button>
               <input id="input-file-camera" type="file" accept="image/*" capture="environment" class="hidden">
             </div>
-            <p id="status-formulario" class="form-message" role="status" aria-live="polite">Sugestões aparecem enquanto você digita. Confira o número antes de adicionar.</p>
+            <p id="status-formulario" class="form-message" role="status" aria-live="polite">As sugestões incluem o número que você digitar. Selecione uma e confirme.</p>
           </form>
           <div id="revisao-endereco" class="review-panel hidden" aria-label="Revisar endereço selecionado">
-            <div class="review-heading"><div><span class="eyebrow">CONFIRA O ENDEREÇO</span><h3>Está tudo certo?</h3><p>Corrija rua, número ou bairro, caso precise.</p></div><button id="btn-fechar-revisao" class="icon-btn" type="button" title="Cancelar" aria-label="Cancelar"><i class="fa-solid fa-xmark"></i></button></div>
+            <div class="review-heading"><div><span class="eyebrow">CONFIRA O ENDEREÇO</span><h3>Está tudo certo?</h3><p>O número foi preservado. Corrija algum campo se necessário e confirme.</p></div><button id="btn-fechar-revisao" class="icon-btn" type="button" title="Cancelar" aria-label="Cancelar"><i class="fa-solid fa-xmark"></i></button></div>
             <form id="form-revisao" autocomplete="off">
               <div class="review-fields">
                 <label class="street-col">Rua / avenida<input id="review-rua" required placeholder="Nome da rua"></label>

@@ -307,3 +307,21 @@ input::placeholder {color:#9aac9f}
 .arrival-notice{margin:12px 0 0;border-radius:11px;background:#d5f5c7;color:#254f36;font-size:12px;font-weight:800;padding:12px 14px}
 @media(max-width:660px){.extras-grid{grid-template-columns:1fr 1fr}.extras-grid label:first-child{grid-column:1/-1}}
 @media(max-width:360px){.extras-grid{grid-template-columns:1fr}.extras-grid label:first-child{grid-column:auto}}
+
+/* V7: autocomplete mais legível e amigável no celular. */
+.address-surface {position:relative;z-index:3}
+#entregas {position:relative;z-index:1}
+.suggestions {min-width:100%;max-height:min(360px,50vh);z-index:1100;overscroll-behavior:contain}
+.suggestion {min-height:66px;align-items:center;padding:12px 14px;cursor:pointer}
+.suggestion strong {font-size:13px;line-height:1.4}
+.suggestion small {font-size:11px}
+.suggestion em {font-size:10px}
+.suggestion .number-found {color:#188053}
+.suggestion:focus-visible {outline:3px solid #7dcba0;outline-offset:-3px}
+.review-fields input {font-size:14px}
+@media(max-width:650px) {
+  .suggestions {max-height:min(320px,48vh)}
+  .search-area input {font-size:16px}
+  .review-fields {grid-template-columns:repeat(2,minmax(0,1fr))}
+  .review-fields .street-col {grid-column:1/-1}
+}

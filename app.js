@@ -1,7 +1,7 @@
 let maplibregl = null; // O mapa é carregado de forma isolada: falhas da CDN não interrompem os cadastros.
 
 /**
- * RotaFácil V6 — revisão técnica, ancoragem viária, otimização sob demanda e entrega simplificada.
+ * RotaFácil V7 — autocompletar por rua, número preservado e confirmação rápida.
  * Serviços públicos são configurados aqui; o usuário final não precisa configurar nada.
  * Para operação comercial em escala, use serviços com contrato/servidor próprios.
  */
@@ -13,8 +13,8 @@ const CONFIG = Object.freeze({
   raioChegadaMetros: 10,
   gpsPrecisaoMaxima: 10,
   maxSnapMetros: 130,
-  sugestaoDelay: 750,
-  intervaloMinBusca: 1100,
+  sugestaoDelay: 550,
+  intervaloMinBusca: 900,
   intervaloGPS: 5000,
   maxPontosRoteamento: 24,
   limiteTempoBuscaMs: 12000,
@@ -88,7 +88,7 @@ let gpsWatchId = null, gpsTimer = null, ultimaPosicaoGPS = null, instanteExibido
 let idEmEdicao = null;
 const destinosAvisados = new Set();
 let debounceBusca = null, buscaController = null, buscaSequencia = 0;
-let sugestoesAtuais = [], sugestaoDestacada = -1, textoOriginalBusca = '';
+let sugestoesAtuais = [], sugestaoDestacada = -1, textoOriginalBusca = '', sugestaoSelecionada = null;
 let filaBusca = Promise.resolve(), ultimaChamadaPhoton = 0;
 let ultimoErroMapa = false;
 let revisaoVersao = 0, revisaoController = null, otimizacaoEmCurso = false;
@@ -330,11 +330,12 @@ function obterUF(estado) {
 }
 function tratarPhoton(feature) {
   const p=feature?.properties||{}, arr=feature?.geometry?.coordinates||[];
-  const rua=p.street||(['street','house'].includes(p.type)?p.name:'');
-  if (!rua || !Number.isFinite(arr[0]) || !Number.isFinite(arr[1])) return null;
-  return {rua,numero:String(p.housenumber||''),bairro:p.district||p.locality||p.suburb||'',
-    cidade:p.city||'',uf:obterUF(p.state),cep:p.postcode||'', pais:String(p.countrycode||'').toUpperCase(),
-    lat:Number(arr[1]),lon:Number(arr[0])};
+  // O Photon pode representar uma rua como name, street ou ainda como um endereço de casa.
+  const rua=p.street||(['street','house'].includes(p.type)||p.housenumber?p.name:'');
+  if (typeof rua!=='string' || !rua.trim() || !Number.isFinite(arr[0]) || !Number.isFinite(arr[1])) return null;
+  return {rua:rua.trim(),numero:String(p.housenumber||''),bairro:p.district||p.locality||p.suburb||'',
+    cidade:p.city||p.municipality||'',uf:obterUF(p.state),cep:p.postcode||'',
+    pais:String(p.countrycode||'').toUpperCase(),lat:Number(arr[1]),lon:Number(arr[0])};
 }
 function pontuarCandidato(c,campos) {
   if (!mesmaRua(c.rua,campos.rua) || (c.pais && c.pais !== 'BR')) return -1000;
@@ -375,15 +376,28 @@ async function sugestoesBusca(termo,signal) {
   const campos=interpretarEndereco(termo);
   const cacheKey=normalizar(termo);
   if (cacheBusca.has(cacheKey)) return cacheBusca.get(cacheKey);
-  let lista=await pesquisarPhoton(termo,{signal});
-  let ordenados=ordenarResultados(lista,campos);
-  if (!ordenados.length) {
-    // Muitos provedores não indexam os números: procura a rua separadamente.
-    lista=await pesquisarPhoton([campos.rua,campos.bairro,campos.cidade].filter(Boolean).join(' '),{signal});
-    ordenados=ordenarResultados(lista,campos);
+
+  // Fundamental: o número não é um termo de pesquisa de NOME DA RUA.
+  // A sugestão de rua recebe o número digitado somente na interface, e a confirmação
+  // tentará geocodificar a residência específica. Evita "Rua Votuporanga 264" → zero resultados.
+  const pesquisas = [
+    [campos.rua, campos.cidade].filter(Boolean).join(', '),
+    campos.rua,
+    termo
+  ];
+  let ordenados=[];
+  let ultimoErro=null;
+  for(const texto of [...new Set(pesquisas.filter(x=>x.length>=3))]) {
+    if(signal?.aborted)throw new DOMException('Busca cancelada','AbortError');
+    try {
+      const lista=await pesquisarPhoton(texto,{signal,limite:15});
+      ordenados=ordenarResultados([...ordenados,...lista],campos);
+      if(ordenados.length)break;
+    } catch(e) { if(e.name==='AbortError')throw e;ultimoErro=e; }
   }
+  if(!ordenados.length && ultimoErro) throw ultimoErro;
   cacheBusca.set(cacheKey,ordenados);
-  if (cacheBusca.size>50) cacheBusca.delete(cacheBusca.keys().next().value);
+  if(cacheBusca.size>60)cacheBusca.delete(cacheBusca.keys().next().value);
   return ordenados;
 }
 function fecharSugestoes() {
@@ -410,11 +424,15 @@ function mostrarSugestoes(termo,resultados) {
     const bloco=document.createElement('span');
     const titulo=document.createElement('strong');
     const leitura=interpretarEndereco(termo);
-    titulo.textContent=d.rua+(leitura.numero?`, ${leitura.numero}`:d.numero?`, ${d.numero}`:'');
-    const sub=document.createElement('small');sub.textContent=[d.bairro,d.cidade,d.uf].filter(Boolean).join(' · ');
+    const numeroExibido=leitura.numero||d.numero;
+    titulo.textContent=d.rua+(numeroExibido?`, ${numeroExibido}`:'');
+    const sub=document.createElement('small');
+    sub.textContent=[d.bairro||leitura.bairro,d.cidade||leitura.cidade,d.uf||leitura.uf].filter(Boolean).join(' · ');
     bloco.append(titulo,sub);
-    if(leitura.numero && !mesmoNumero(d.numero,leitura.numero)) {
-      const em=document.createElement('em');em.textContent='Número ainda não confirmado';bloco.append(em);
+    if(numeroExibido && !mesmoNumero(d.numero,numeroExibido)) {
+      const em=document.createElement('em');em.textContent='Número digitado · confirmar localização';bloco.append(em);
+    } else if(numeroExibido) {
+      const em=document.createElement('em');em.className='number-found';em.textContent='Número encontrado';bloco.append(em);
     }
     b.append(ico,bloco);
     b.addEventListener('click',()=>{ textoOriginalBusca=termo; prepararRevisao(d); });
@@ -431,6 +449,7 @@ async function buscarSugestoes(termo) {
     const resultados=await sugestoesBusca(termo,buscaController.signal);
     if(seq!==buscaSequencia || termo!==ui.endereco.value.trim())return;
     mostrarSugestoes(termo,resultados);
+    if(resultados.length) aviso('Escolha o endereço da lista. O número que você digitou será mantido.');
   } catch(e) {
     if(e.name!=='AbortError' && seq===buscaSequencia) {
       fecharSugestoes(); aviso('A busca automática não respondeu. Você pode preencher o endereço manualmente.',true);
@@ -458,8 +477,9 @@ ui.form.addEventListener('submit',e=>{
   e.preventDefault();const valor=ui.endereco.value.trim();if(valor.length<3)return;
   textoOriginalBusca=valor;
   // Busca é opcional: o usuário pode ir direto para conferência mesmo se o serviço falhar.
-  if(sugestoesAtuais.length===1) prepararRevisao(sugestoesAtuais[0]);
-  else prepararRevisao(null);
+  // Mesmo se não aparecer uma sugestão, o usuário pode revisar e salvar.
+  // Havendo sugestões, a mais adequada é usada apenas como referência da rua.
+  prepararRevisao(sugestoesAtuais[0]||null);
 });
 
 function precisão(tipo,msg) {
@@ -475,9 +495,14 @@ function cancelarConferencia() {
 }
 function fecharRevisao() {
   cancelarConferencia(); ui.revisao.classList.add('hidden'); idEmEdicao=null;
+  sugestaoSelecionada=null;
 }
 function prepararRevisao(sugestao=null, paradaExistente=null) {
   cancelarBusca();fecharSugestoes();fecharRevisao();
+  sugestaoSelecionada=sugestao || (paradaExistente?.campos ? {
+    ...paradaExistente.campos,lat:paradaExistente.lat,lon:paradaExistente.lon,
+    pais:'BR'
+  } : null); // referência estável; editar o número NÃO reaproveita precisão anterior.
   idEmEdicao=paradaExistente?.id||null;
   const digitado=paradaExistente?.campos||interpretarEndereco(textoOriginalBusca||ui.endereco.value);
   let bairroDigitado=digitado.bairro||'';
@@ -496,8 +521,8 @@ function prepararRevisao(sugestao=null, paradaExistente=null) {
     cidade:ui.reviewCidade,uf:ui.reviewUf,cep:ui.reviewCep}))input.value=dado[chave]||'';
   ui.revisao.classList.remove('hidden');
   ui.endereco.value=enderecoCompleto(dado);
-  precisão('normal', idEmEdicao ? 'Confira as informações. Ao confirmar, vamos localizar o endereço novamente.'
-    : 'Confira o endereço. Ao confirmar, vamos verificar o ponto no mapa.');
+  precisão('normal', idEmEdicao ? 'Confira o número e confirme a nova localização.'
+    : 'O número foi mantido. Confira os dados e toque em OK para adicionar a parada.');
   ui.reviewNotas.value=paradaExistente?.notas||'';
   ui.reviewPrioridade.checked=Boolean(paradaExistente?.urgente);
   ui.reviewTempo.value=String(paradaExistente?.tempoParada||0);
@@ -506,43 +531,42 @@ function prepararRevisao(sugestao=null, paradaExistente=null) {
   if(sugestao&&mapPronto&&mapa) mapa.flyTo({center:[sugestao.lon,sugestao.lat],zoom:16,duration:450});
 }
 // Ao confirmar, buscamos NOVAMENTE, inclusive se o número foi editado.
-async function geocodificarRevisado(campos, signal) {
-  // Consulta estruturada é mais previsível que tentar adivinhar o número na string livre.
+async function geocodificarRevisado(campos, signal, referencia = null) {
+  // 1) Busca a casa exata (quando cadastrada na base). Respostas sem número NUNCA são chamadas de exatas.
   let resultados=[];
-  if (campos.numero) {
+  if(campos.numero) {
     const params=new URLSearchParams({street:campos.rua,housenumber:campos.numero,
-      city:campos.cidade,countrycode:'BR',limit:'12',lang:'pt'});
-    if (campos.bairro) params.set('district',campos.bairro);
-    if (campos.cep) params.set('postcode',campos.cep.replace(/\D/g,''));
+      city:campos.cidade,countrycode:'BR',limit:'10',lang:'pt'});
     try {
       const data=await photon(`${CONFIG.photon}/structured?${params}`,signal);
       resultados=(data.features||[]).map(tratarPhoton).filter(Boolean);
-    } catch (e) {
-      if (e.name==='AbortError') throw e;
-      console.warn('Consulta estruturada:',e);
-    }
+    } catch(e) { if(e.name==='AbortError')throw e; console.warn('Busca do número:',e); }
   }
-  // A busca livre complementa a estruturada; não considera o número confirmado por aproximação.
-  if (!resultados.some(r=>mesmoNumero(r.numero,campos.numero))) {
-    try { resultados.push(...await pesquisarPhoton(pesquisaCompleta(campos),{limite:12,signal})); }
-    catch(e) { if(e.name==='AbortError')throw e; console.warn('Busca completa:',e); }
-  }
+
+  // 2) Usa a própria sugestão já selecionada como fallback, sem requisições extras.
+  // Isso evita que um erro no serviço de busca impeça a entrega de ser adicionada.
+  if(referencia && mesmaRua(referencia.rua,campos.rua) &&
+     (!referencia.cidade||normalizar(referencia.cidade)===normalizar(campos.cidade)) &&
+     (!referencia.uf||referencia.uf===campos.uf)) resultados.push(referencia);
+
   let ordenados=ordenarResultados(resultados,campos);
-  if(!ordenados.length || !ordenados.some(r=>mesmoNumero(r.numero,campos.numero))) {
-    try {
-      const rua=await pesquisarPhoton([campos.rua,campos.bairro,campos.cidade].filter(Boolean).join(' '),{limite:12,signal});
-      ordenados=ordenarResultados([...ordenados,...rua],campos);
-    } catch(e) { if(e.name==='AbortError'||!ordenados.length)throw e; }
-  }
-  // Prioriza um resultado com número correspondente. Endereços sem dados de cidade/UF não são exatos.
-  const comNumero=ordenados.find(r=>campos.numero&&mesmoNumero(r.numero,campos.numero)&&
+  let exato=ordenados.find(r=>campos.numero&&mesmoNumero(r.numero,campos.numero)&&
     r.cidade&&normalizar(r.cidade)===normalizar(campos.cidade)&&r.uf===campos.uf&&
     (!campos.bairro||!r.bairro||normalizar(r.bairro)===normalizar(campos.bairro)));
-  const melhor=comNumero||ordenados[0];
+
+  // 3) Se a consulta por número falhou, tenta a rua. Não precisa esperar múltiplos provedores.
+  if(!exato && !ordenados.length) {
+    for(const texto of [[campos.rua,campos.cidade].filter(Boolean).join(', '),campos.rua]) {
+      try {
+        const lista=await pesquisarPhoton(texto,{limite:12,signal});
+        ordenados=ordenarResultados([...ordenados,...lista],campos);
+        if(ordenados.length)break;
+      } catch(e) { if(e.name==='AbortError')throw e; console.warn('Busca de rua:',e); }
+    }
+  }
+  const melhor=exato||ordenados[0];
   if(!melhor)return null;
-  const bairroOK=!campos.bairro||!melhor.bairro||normalizar(melhor.bairro)===normalizar(campos.bairro);
-  const exato=Boolean(comNumero&&bairroOK);
-  return {...melhor,exato};
+  return {...melhor,exato:Boolean(exato)};
 }
 // Resolve a navegação na rua correta. A entrada mapeada é opcional e não é inventada.
 function distanciaArestaMetros(p, a, b) {
@@ -585,7 +609,7 @@ async function entradaPredialMapeada(campos, posicao, signal) {
 async function encaixarNaRua(campos, posicao, signal) {
   const url=`${CONFIG.osrm}/nearest/v1/driving/${posicao.lon},${posicao.lat}?number=5`;
   try {
-    const resposta=await fetchComTimeout(url,{signal,timeout:6500});
+    const resposta=await fetchComTimeout(url,{signal,timeout:3000});
     if(!resposta.ok)throw new Error('Via indisponível');
     const dados=await resposta.json();
     const vias=(dados.waypoints||[]).filter(p=>Array.isArray(p.location)&&Number.isFinite(p.distance));
@@ -599,20 +623,17 @@ async function encaixarNaRua(campos, posicao, signal) {
   }catch(e){if(e.name==='AbortError')throw e;return { ...posicao, viaConfirmada:false, deslocamento:null };}
 }
 async function resolverPontoDeEntrega(campos, achado, signal) {
-  let predio=null;
-  if(achado.exato) {
-    try { predio=await entradaPredialMapeada(campos,achado,signal); }
-    catch(e){ if(e.name==='AbortError')throw e; }
-  }
-  const base=predio||{lat:achado.lat,lon:achado.lon};
+  // O cadastro deve ser rápido. Buscar entradas prediais no Overpass a cada parada
+  // causava lentidão e bloqueios. Usamos a localização de imóvel, se conhecida,
+  // ou o ponto da rua, e tentamos alinhar com a malha viária sem impedir o cadastro.
+  const base={lat:achado.lat,lon:achado.lon};
   const acesso=await encaixarNaRua(campos,base,signal);
   return {
     lat:acesso.lat,lon:acesso.lon,
-    precisao: predio&&acesso.viaConfirmada ? 'entrada' :
-      achado.exato && acesso.viaConfirmada ? 'confirmado' : 'aproximado',
-    acesso:{fonte:predio?'entrada_mapeada':achado.exato?'numero_geocodificado':'referencia_da_rua',
+    precisao:achado.exato&&acesso.viaConfirmada?'confirmado':'aproximado',
+    acesso:{fonte:achado.exato?'numero_geocodificado':'referencia_da_rua',
       viaConfirmada:acesso.viaConfirmada,distanciaAteVia:acesso.deslocamento,
-      pontoImovel:{lat:achado.lat,lon:achado.lon}}
+      pontoImovel:base}
   };
 }
 function adicionarOuAtualizar(campos,local) {
@@ -638,12 +659,12 @@ ui.formRevisao.addEventListener('submit',async e=>{
   if(!/^[A-Z]{2}$/.test(campos.uf)){precisão('alerta','Confira a sigla do estado.');return;}
   cancelarConferencia();const versao=revisaoVersao;
   revisaoController=new AbortController();const signal=revisaoController.signal;
-  busy(ui.btnConfirmar,true,'Localizando...');
-  precisão('normal','Localizando o número e o melhor acesso pela rua...');
+  busy(ui.btnConfirmar,true,'Adicionando...');
+  precisão('normal','Conferindo número e ponto de entrega...');
   try {
-    const ponto=await geocodificarRevisado(campos,signal);
+    const ponto=await geocodificarRevisado(campos,signal,sugestaoSelecionada);
     if(versao!==revisaoVersao||ui.revisao.classList.contains('hidden'))return;
-    if(!ponto){precisão('alerta','Rua não encontrada. Confira bairro e cidade antes de continuar.');return;}
+    if(!ponto){precisão('alerta','Não localizamos essa rua. Confira o nome e a cidade e tente novamente.');return;}
     const destino=await resolverPontoDeEntrega(campos,ponto,signal);
     if(versao!==revisaoVersao||ui.revisao.classList.contains('hidden'))return;
     if(!coordenadasValidas(destino))throw new Error('Coordenadas inválidas');
@@ -651,7 +672,7 @@ ui.formRevisao.addEventListener('submit',async e=>{
   }catch(erro){
     if(versao===revisaoVersao&&erro.name!=='AbortError'){
       console.warn('Falha de endereço:',erro);
-      precisão('alerta','Não foi possível localizar esse endereço agora. Tente novamente.');
+      precisão('alerta','Busca indisponível. Tente novamente; se aparecer uma sugestão, selecione-a primeiro.');
     }
   }finally{if(versao===revisaoVersao){busy(ui.btnConfirmar,false);revisaoController=null;}}
 });
