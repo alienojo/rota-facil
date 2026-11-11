@@ -1,1205 +1,736 @@
-let maplibregl = null; // O mapa é carregado de forma isolada: falhas da CDN não interrompem os cadastros.
+(() => {
+  'use strict';
 
-/**
- * RotaFácil V8 — sugestão preenche tudo e a entrega é adicionada diretamente.
- * A edição permanece opcional na lista de paradas.
- * Serviços públicos são configurados aqui; o usuário final não precisa configurar nada.
- * Para operação comercial em escala, use serviços com contrato/servidor próprios.
- */
-const CONFIG = Object.freeze({
-  mapStyle: 'https://tiles.openfreemap.org/styles/positron',
-  photon: 'https://photon.komoot.io',
-  osrm: 'https://router.project-osrm.org',
-  overpass: 'https://overpass-api.de/api/interpreter',
-  raioChegadaMetros: 10,
-  gpsPrecisaoMaxima: 10,
-  maxSnapMetros: 130,
-  sugestaoDelay: 550,
-  intervaloMinBusca: 900,
-  intervaloGPS: 5000,
-  maxPontosRoteamento: 24,
-  limiteTempoBuscaMs: 12000,
-  limiteTempoRotaMs: 18000,
-  cidadePadrao: 'São José dos Campos',
-  ufPadrao: 'SP',
-  origemPadrao: { endereco: 'Centro de São José dos Campos, SP (aproximado)', lat: -23.1794, lon: -45.8869, personalizado: false }
-});
-const $ = id => document.getElementById(id);
-const ui = {
-  form: $('form-parada'), endereco: $('input-endereco'), sugestoes: $('sugestoes-endereco'),
-  searchSpinner: $('search-spinner'), status: $('status-formulario'), btnAdicionar: $('btn-adicionar'),
-  revisao: $('revisao-endereco'), formRevisao: $('form-revisao'), btnFecharRevisao: $('btn-fechar-revisao'),
-  reviewRua: $('review-rua'), reviewNumero: $('review-numero'), reviewBairro: $('review-bairro'),
-  reviewCidade: $('review-cidade'), reviewUf: $('review-uf'), reviewCep: $('review-cep'),
-  btnConfirmar: $('btn-confirmar-endereco'), btnEditar: $('btn-editar-endereco'),
-  reviewNotas: $('review-notas'), reviewPrioridade: $('review-prioridade'), reviewTempo: $('review-tempo'),
-  precisao: $('resultado-precisao'), avisoChegada: $('aviso-chegada'),
-  lista: $('lista-entregas'), contador: $('contador-paradas'), resumo: $('resumo-entregas'),
-  btnLimpar: $('btn-limpar'), btnOtimizar: $('btn-otimizar'), btnComecar: $('btn-comecar-rota'),
-  btnResetar: $('btn-resetar-rota'), btnCamera: $('btn-camera'), inputCamera: $('input-file-camera'),
-  inputOrigem: $('input-origem'), btnGpsOrigem: $('btn-gps-atual'), btnSalvarOrigem: $('btn-salvar-origem'),
-  labelOrigem: $('label-status-origem'), ajudaOrigem: $('ajuda-origem'),
-  painel: $('painel-bola-da-vez'), numeroProxima: $('numero-bola-da-vez'), enderecoProxima: $('endereco-bola-da-vez'),
-  progresso: $('progresso-rota'), btnNavegar: $('btn-navegar-ativa'), btnConcluir: $('btn-concluir-ativa'),
-  statusMapa: $('status-mapa'), mapaLoading: $('map-loading'), mapHint: $('map-hint'), btnAjustar: $('btn-ajustar-mapa'),
-  btnGpsLive: $('btn-gps-live'), btnCentralizarGps: $('btn-centralizar-gps'), gpsStatus: $('gps-status'),
-  metricTotal: $('metric-total'), metricPendentes: $('metric-pendentes'),
-  metricConcluidas: $('metric-concluidas'), metricProgress: $('metric-progress'),
-  progressBar: $('progress-bar'), progressTrack: $('progress-track'), routeState: $('route-state'),
-  heroStatus: $('hero-status'), heroDistancia: $('hero-distancia'), heroTempo: $('hero-tempo'),
-  heroPendentes: $('hero-pendentes'), optimizationMessage: $('optimization-message')
-};
-const faltantes=Object.entries(ui).filter(([,elemento])=>!elemento).map(([nome])=>nome);
-if(faltantes.length)throw new Error('Elementos obrigatórios do RotaFácil ausentes: '+faltantes.join(', '));
-const KEYS = {
-  paradas: 'rotafacil_paradas',
-  origem: 'rotafacil_origem',
-  iniciada: 'rotafacil_iniciada',
-  planejamento: 'rotafacil_v5_planejamento'
-};
-function ler(chave, fallback) {
-  try { const v = localStorage.getItem(chave); return v === null ? fallback : JSON.parse(v); }
-  catch { return fallback; }
-}
-const coordenadasValidas = p => p && p.lat != null && p.lon != null && p.lat !== '' && p.lon !== '' &&
-  Number.isFinite(Number(p.lat)) && Number.isFinite(Number(p.lon)) &&
-  Math.abs(Number(p.lat)) <= 90 && Math.abs(Number(p.lon)) <= 180;
-function normalizarParadas(valor) {
-  return Array.isArray(valor) ? valor.filter(p => p && coordenadasValidas(p) && typeof p.endereco === 'string')
-    .map(p => ({ id: String(p.id || `${Date.now()}-${Math.random()}`), endereco: p.endereco,
-      lat: Number(p.lat), lon: Number(p.lon), concluida: Boolean(p.concluida),
-      precisao: p.precisao || 'legado', campos: p.campos || null,
-      acesso: p.acesso || null, urgente: Boolean(p.urgente),
-      notas: String(p.notas || '').slice(0,200), tempoParada: Math.min(120, Math.max(0, Number(p.tempoParada) || 0)) })) : [];
-}
-let origem = ler(KEYS.origem, { ...CONFIG.origemPadrao });
-if (!coordenadasValidas(origem)) origem = { ...CONFIG.origemPadrao };
-let paradas = normalizarParadas(ler(KEYS.paradas, []));
-let rotaIniciada = Boolean(ler(KEYS.iniciada, false));
-let planejamento = ler(KEYS.planejamento, null);
-// O armazenamento local pode estar corrompido ou conter o formato de versões antigas.
-if (!planejamento || typeof planejamento !== 'object' ||
-    !Array.isArray(planejamento.coordenadas) ||
-    !planejamento.coordenadas.every(p => Array.isArray(p) && p.length === 2 &&
-      p.every(Number.isFinite)) ||
-    (planejamento.km != null && !Number.isFinite(planejamento.km)) ||
-    (planejamento.min != null && !Number.isFinite(planejamento.min))) planejamento = null;
-let mapPronto = false, mapa, marcadores = [], marcadorPrevia = null, marcadorGPS = null;
-let gpsWatchId = null, gpsTimer = null, ultimaPosicaoGPS = null, instanteExibidoGPS = 0, acompanharGPS = false, gpsVersao = 0;
-let idEmEdicao = null;
-const destinosAvisados = new Set();
-let debounceBusca = null, buscaController = null, buscaSequencia = 0;
-let sugestoesAtuais = [], sugestaoDestacada = -1, textoOriginalBusca = '', sugestaoSelecionada = null;
-// Guarda a sugestão escolhida. Alterar o campo descarta essa referência para evitar coordenadas antigas.
-let enderecoSelecionado = null;
-let cadastroEmCurso = false;
-let filaBusca = Promise.resolve(), ultimaChamadaPhoton = 0;
-let ultimoErroMapa = false;
-let revisaoVersao = 0, revisaoController = null, otimizacaoEmCurso = false;
-const cacheBusca = new Map();
+  // RotaFácil V9 — HTML/CSS/JS puro. Sem cadastros ou chaves exigidas do motorista.
+  // Photon oferece busca conforme digita; ViaCEP complementa rua, bairro e CEP.
+  // Para escala comercial, hospede um serviço de geocodificação com SLA/proxy próprio.
+  const CFG = Object.freeze({
+    photon: 'https://photon.komoot.io', viaCep: 'https://viacep.com.br/ws',
+    osrm: 'https://router.project-osrm.org',
+    mapStyle: 'https://tiles.openfreemap.org/styles/positron',
+    debounceMs: 480, timeoutMs: 9000, maxStopsForRoadMatrix: 23,
+    defaultOrigin: { endereco: 'Centro de São José dos Campos, SP', lat: -23.1794, lon: -45.8869, personalizado: false }
+  });
+  const ID = id => document.getElementById(id);
+  const ui = {
+    input: ID('address-input'), listbox: ID('address-options'), searchLoading: ID('search-loading'),
+    form: ID('form-add'), add: ID('btn-adicionar'), help: ID('address-message'), cancelEdit: ID('btn-cancel-edit'),
+    city: ID('city-input'), state: ID('state-input'),
+    optimize: ID('btn-otimizar'), start: ID('btn-iniciar'), heroNotice: ID('hero-notice'),
+    heroCount: ID('hero-qtd'), heroKm: ID('hero-km'), heroMin: ID('hero-min'),
+    map: ID('map'), mapPlaceholder: ID('map-placeholder'), mapStatus: ID('map-status'), mapBadge: ID('map-badge'),
+    gps: ID('btn-gps'), fit: ID('btn-enquadrar'), gpsMessage: ID('gps-message'),
+    originInput: ID('origin-input'), originBtn: ID('btn-definir-origem'), originGPS: ID('btn-origem-gps'),
+    originLabel: ID('origin-label'), originStatus: ID('origin-status'),
+    list: ID('stops-list'), subtitle: ID('list-subtitle'), count: ID('count-badge'),
+    clean: ID('btn-limpar-feitas'), reset: ID('btn-apagar-tudo'),
+    total: ID('stat-total'), pending: ID('stat-pendentes'), done: ID('stat-concluidas'),
+    percent: ID('stat-percent'), progressBar: ID('progress-bar'),
+    next: ID('next-stop'), nextNumber: ID('next-number'), nextAddress: ID('next-address'),
+    nextProgress: ID('next-progress'), nextNavigate: ID('next-navigate'), nextDone: ID('next-done'),
+    arrived: ID('arrival-note'), toast: ID('toast')
+  };
+  const missing = Object.entries(ui).filter(([,element]) => !element).map(([key]) => key);
+  if (missing.length) { console.error('RotaFácil: elementos não encontrados:', missing); return; }
 
-function chaveDaRota() {
-  // Uma edição de endereço/origem invalida o plano, mas concluir uma entrega não.
-  return JSON.stringify({ origem: [origem.lat, origem.lon],
-    paradas: paradas.map(p => [p.id, p.lat, p.lon, p.urgente, p.tempoParada]) });
-}
-function rotaOtimizada() {
-  return Boolean(planejamento && planejamento.chave === chaveDaRota() &&
-    Array.isArray(planejamento.coordenadas));
-}
-// Concluir/desfazer uma parada não invalida a rota pronta, mas invalida um cálculo ainda em andamento.
-function assinaturaCalculo() {
-  return JSON.stringify({ origem: [origem.lat, origem.lon],
-    paradas: paradas.map(p => [p.id, p.lat, p.lon, p.concluida, p.urgente, p.tempoParada]) });
-}
-async function fetchComTimeout(url, { signal, timeout = CONFIG.limiteTempoBuscaMs } = {}) {
-  const controller = new AbortController();
-  const abortar = () => controller.abort();
-  if (signal?.aborted) controller.abort();
-  else signal?.addEventListener('abort', abortar, { once: true });
-  let expirou = false;
-  const timeoutId = setTimeout(() => { expirou=true; controller.abort(); }, timeout);
-  try { return await fetch(url, { signal: controller.signal, headers: { Accept: 'application/json' } }); }
-  catch (erro) {
-    // Diferenciar demora do provedor de um cancelamento feito pelo usuário.
-    if (expirou && !signal?.aborted) {
-      const falha = new Error('A consulta demorou demais. Tente novamente.');
-      falha.name = 'TimeoutError';
-      throw falha;
+  const STORE = { stops: 'rotafacil_paradas', origin: 'rotafacil_origem', started: 'rotafacil_iniciada', route: 'rotafacil_v9_rota', searchArea: 'rotafacil_v9_area' };
+  const getJSON = (key, fallback) => { try { const str = localStorage.getItem(key); return str === null ? fallback : JSON.parse(str); } catch { return fallback; } };
+  function validPoint(point) {
+    const lat = Number(point?.lat), lon = Number(point?.lon);
+    return point && point.lat !== '' && point.lon !== '' && point.lat != null && point.lon != null &&
+      Number.isFinite(lat) && Number.isFinite(lon) && Math.abs(lat) <= 90 && Math.abs(lon) <= 180;
+  }
+  function cleanedStop(item) {
+    if (!validPoint(item) || typeof item.endereco !== 'string') return null;
+    return {
+      id: String(item.id ?? `${Date.now()}-${Math.random()}`), endereco: item.endereco,
+      lat: Number(item.lat), lon: Number(item.lon), concluida: Boolean(item.concluida),
+      precision: item.precision || item.precisao || 'aproximada',
+      city: String(item.city || item.campos?.cidade || ''), uf: String(item.uf || item.campos?.uf || 'SP'),
+      number: String(item.number || item.campos?.numero || ''),
+      urgent: Boolean(item.urgent || item.urgente),
+      notes: String(item.notes || item.notas || '').slice(0, 200)
+    };
+  }
+  let stops = (Array.isArray(getJSON(STORE.stops, [])) ? getJSON(STORE.stops, []) : []).map(cleanedStop).filter(Boolean);
+  let origin = getJSON(STORE.origin, { ...CFG.defaultOrigin });
+  if (!validPoint(origin)) origin = { ...CFG.defaultOrigin };
+  origin = { ...origin, lat: Number(origin.lat), lon: Number(origin.lon) };
+  const savedArea = getJSON(STORE.searchArea, { city: 'São José dos Campos', uf: 'SP' });
+  ui.city.value = String(savedArea?.city || 'São José dos Campos');
+  ui.state.value = String(savedArea?.uf || 'SP');
+  let planned = getJSON(STORE.route, null);
+  let started = Boolean(getJSON(STORE.started, false));
+  let editingId = null;
+  let routeRevision = 0;
+  let optimizing = false;
+  let selected = null;
+  let highlighted = -1;
+  let currentSuggestions = [];
+  let searchSeq = 0;
+  let searchController = null;
+  let searchTimer = null;
+  let toastTimer = null;
+  const searchCache = new Map();
+  let lastPhotonTime = 0;
+  let photonQueue = Promise.resolve();
+  let map = null, mapReady = false, gpsMarker = null, gpsAccuracyMarker = null, markers = [];
+  let gpsWatchId = null, gpsVisualTimer = null, gpsFix = null, activeArrivalId = null;
+
+  function signature() { return JSON.stringify({ origin: [origin.lat, origin.lon], stops: stops.map(p => [p.id, p.lat, p.lon, p.concluida]) }); }
+  function routeValid() { return planned && planned.signature === signature() && Array.isArray(planned.order) && planned.order.length > 0; }
+  if (!routeValid()) { planned = null; started = false; }
+  function save() {
+    try {
+      localStorage.setItem(STORE.stops, JSON.stringify(stops));
+      localStorage.setItem(STORE.origin, JSON.stringify(origin));
+      localStorage.setItem(STORE.started, JSON.stringify(started));
+      if (planned) localStorage.setItem(STORE.route, JSON.stringify(planned));
+      else localStorage.removeItem(STORE.route);
+      localStorage.setItem(STORE.searchArea, JSON.stringify({ city: ui.city.value.trim(), uf: ui.state.value.trim().toUpperCase() }));
+    } catch (error) { console.error('Não foi possível salvar o projeto:', error); showToast('Não foi possível salvar os dados neste navegador.'); }
+  }
+  function textStatus(message, error = false) { ui.help.textContent = message; ui.help.classList.toggle('error', error); ui.help.classList.toggle('success', !error && /adicionada|atualizado|selecionado|adicionado/.test(message.toLowerCase())); }
+  function showToast(message) { ui.toast.textContent = message; ui.toast.classList.remove('hidden'); clearTimeout(toastTimer); toastTimer = setTimeout(() => ui.toast.classList.add('hidden'), 3900); }
+  function setBusy(button, busy, busyMessage) {
+    if (busy) { button.dataset.original = button.textContent; button.textContent = busyMessage; }
+    else if (button.dataset.original !== undefined) { button.textContent = button.dataset.original; delete button.dataset.original; }
+    button.disabled = busy;
+  }
+  function invalidate() { routeRevision++; planned = null; started = false; activeArrivalId = null; }
+  const radians = deg => deg * Math.PI / 180;
+  function meters(a, b) {
+    const dLat = radians(b.lat - a.lat), dLon = radians(b.lon - a.lon);
+    const h = Math.sin(dLat / 2) ** 2 + Math.cos(radians(a.lat)) * Math.cos(radians(b.lat)) * Math.sin(dLon / 2) ** 2;
+    return 12742000 * Math.atan2(Math.sqrt(h), Math.sqrt(Math.max(0, 1 - h)));
+  }
+  const norm = s => String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  const normalizeRoad = s => norm(s).replace(/^(rua|avenida|av|travessa|alameda|estrada|rodovia|praca)\s+/, '');
+  const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
+  const locationURL = p => `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(`${p.lat},${p.lon}`)}&travelmode=driving`;
+
+  // ---- Address parsing. Never interpret 'Rua 7 de Setembro' as house number 7. ----
+  function parseAddress(text) {
+    const raw = String(text || '').replace(/\s+/g, ' ').trim();
+    const postcodeMatch = raw.match(/\b\d{5}-?\d{3}\b/);
+    const postcode = postcodeMatch ? postcodeMatch[0].replace(/\D/g, '') : '';
+    const cleaned = postcode ? raw.replace(postcodeMatch[0], ' ').replace(/\s+/g, ' ').trim() : raw;
+    let number = '', road = cleaned, extra = '';
+    const matches = [...cleaned.matchAll(/\b(?:n[º°o]?\.?\s*)?(\d{1,5}[A-Za-z]?)\b/gi)];
+    for (const m of matches.reverse()) {
+      const before = cleaned.slice(0, m.index).trim();
+      const after = cleaned.slice(m.index + m[0].length).trim();
+      const wordBefore = before.split(/[\s,]+/).at(-1)?.toLowerCase();
+      if (!before || (['rua','av','avenida','rodovia','travessa'].includes(wordBefore) && /^de\b/i.test(after))) continue;
+      if (matches.length === 1 && ['rua','av','avenida','rodovia','travessa'].includes(wordBefore)) continue;
+      number = m[1]; road = before.replace(/[\s,º°#-]+$/, '').trim();
+      extra = after.replace(/^[\s,;\-]+/, '').trim();
+      break;
     }
-    throw erro;
-  } finally { clearTimeout(timeoutId); signal?.removeEventListener('abort', abortar); }
-}
-if (!rotaOtimizada()) { planejamento = null; rotaIniciada = false; }
-function salvar() {
-  try {
-    localStorage.setItem(KEYS.paradas, JSON.stringify(paradas));
-    localStorage.setItem(KEYS.origem, JSON.stringify(origem));
-    localStorage.setItem(KEYS.iniciada, JSON.stringify(rotaIniciada));
-    if (planejamento) localStorage.setItem(KEYS.planejamento, JSON.stringify(planejamento));
-    else localStorage.removeItem(KEYS.planejamento);
-  } catch (e) { console.error('Falha ao salvar dados:', e); aviso('Não foi possível salvar seus dados neste navegador.', true); }
-}
-function aviso(msg, erro = false) {
-  ui.status.textContent = msg;
-  ui.status.className = `form-message${erro ? ' is-error' : ''}`;
-}
-function statusPlano(msg, tipo = 'normal') {
-  ui.optimizationMessage.textContent = msg;
-  ui.optimizationMessage.className = `hero-note ${tipo === 'ok' ? 'is-ok' : tipo === 'alerta' ? 'is-alert' : ''}`;
-}
-function busy(btn, ativo, texto) {
-  if (ativo) { if (!btn.dataset.original) btn.dataset.original = btn.innerHTML;
-    btn.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> ${texto}`; }
-  else if (btn.dataset.original) { btn.innerHTML = btn.dataset.original; delete btn.dataset.original; }
-  btn.disabled = ativo;
-}
-function htmlSeguro(v) { return String(v ?? '').replace(/[&<>"']/g, c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c])); }
-function normalizar(txt) { return String(txt || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase()
-  .replace(/\b(rua|avenida|av|travessa|alameda|estrada|rodovia)\.?\s+/g, '').replace(/[^a-z0-9]+/g, ' ').trim(); }
-function mesmaRua(a,b) { const x=normalizar(a), y=normalizar(b); return !!(x && y && (x===y || (x.length>=6 && y.includes(x)) || (y.length>=6 && x.includes(y)))); }
-function mesmoNumero(a,b) { return String(a||'').trim().toLowerCase() !== '' && String(a||'').trim().toLowerCase() === String(b||'').trim().toLowerCase(); }
-function distanciaMetros(a,b) { const rad=Math.PI/180, dy=(b.lat-a.lat)*rad, dx=(b.lon-a.lon)*rad;
-  const h=Math.sin(dy/2)**2+Math.cos(a.lat*rad)*Math.cos(b.lat*rad)*Math.sin(dx/2)**2;
-  return 12742000*Math.atan2(Math.sqrt(h),Math.sqrt(Math.max(0,1-h))); }
-function urlNavegacao(p) {
-  // Sempre navega para o ponto viário armazenado, nunca reinterpreta o texto no Google Maps.
-  return `https://www.google.com/maps/dir/?api=1&destination=${p.lat},${p.lon}&travelmode=driving`;
-}
-function invalidarPlano() {
-  destinosAvisados.clear();
-  planejamento = null;
-  rotaIniciada = false;
-  atualizarLinha();
-}
+    road = road.replace(/^\s*(?:n[º°o]?\.?\s*)?$/, '').trim();
+    return { road: road || cleaned, number, extra, postcode, raw };
+  }
+  // Parsing fixture exposed for automated checks without exposing implementation to page UI.
+  window.__rotafacilTest = Object.freeze({ parseAddress });
 
-// ---------- MAPA: PONTOS DESDE O CADASTRO; LINHA APENAS DEPOIS DA OTIMIZAÇÃO ----------
-async function iniciarMapa() {
-  const fontes = [
-    'https://unpkg.com/maplibre-gl@6.3.0/dist/maplibre-gl.mjs',
-    'https://cdn.jsdelivr.net/npm/maplibre-gl@6.3.0/dist/maplibre-gl.mjs'
-  ];
-  for (const fonte of fontes) {
-    try { maplibregl = await import(fonte); break; }
-    catch (erro) { console.warn('Falha ao carregar o mapa:', erro); }
+  async function getJSONRemote(url, { signal, timeout = CFG.timeoutMs } = {}) {
+    const controller = new AbortController();
+    if (signal?.aborted) controller.abort();
+    const relay = () => controller.abort();
+    signal?.addEventListener('abort', relay, { once: true });
+    const timer = setTimeout(() => controller.abort(), timeout);
+    try {
+      const response = await fetch(url, { signal: controller.signal, headers: { Accept: 'application/json' } });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      return await response.json();
+    } finally { clearTimeout(timer); signal?.removeEventListener('abort', relay); }
   }
-  if (!maplibregl) {
-    ui.statusMapa.textContent = 'Mapa indisponível no momento. A lista de entregas continua funcionando.';
-    ui.mapHint.textContent = 'Verifique sua conexão e recarregue a página para tentar abrir o mapa.';
-    ui.btnAjustar.disabled = true;
-    return;
+  // One Photon request at a time, with a modest interval so typing doesn't flood the demo API.
+  function photonJSON(url, signal) {
+    const job = async () => {
+      if (signal?.aborted) throw new DOMException('Cancelada', 'AbortError');
+      const cooldown = Math.max(0, 1000 - (Date.now() - lastPhotonTime));
+      if (cooldown) await wait(cooldown);
+      if (signal?.aborted) throw new DOMException('Cancelada', 'AbortError');
+      lastPhotonTime = Date.now();
+      return getJSONRemote(url, { signal });
+    };
+    const running = photonQueue.then(job, job);
+    photonQueue = running.catch(() => {});
+    return running;
   }
-  try {
-    mapa = new maplibregl.Map({ container: 'map', style: CONFIG.mapStyle,
-      center: [Number(origem.lon), Number(origem.lat)], zoom: 13, attributionControl: true });
-    mapa.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'bottom-right');
-    mapa.on('load', () => {
-      mapPronto = true;
-      mapa.addSource('percurso', { type: 'geojson', data: linhaVazia() });
-      mapa.addLayer({ id: 'percurso-tracado', type: 'line', source: 'percurso',
-        layout: { 'line-cap':'round', 'line-join':'round' },
-        paint: { 'line-color':'#1c8b70', 'line-width':5, 'line-opacity': .94,
-          'line-dasharray':[1,0.08] } });
-      mapa.addSource('gps-area', { type:'geojson', data: linhaVazia() });
-      mapa.addLayer({ id:'gps-previsao',type:'fill',source:'gps-area',
-        paint:{ 'fill-color':'#2c89e8', 'fill-opacity':.13 } },'percurso-tracado');
-      mapa.addLayer({ id:'gps-previsao-contorno',type:'line',source:'gps-area',
-        paint:{ 'line-color':'#2c89e8', 'line-opacity':.55, 'line-width':1.4 } },'percurso-tracado');
-      desenharMarcadores(); atualizarLinha(); enquadrar();
-      if (ultimaPosicaoGPS) atualizarGPS(true);
-    });
-    mapa.on('error', e => {
-      console.warn('Mapa:', e.error);
-      if (!mapPronto && !ultimoErroMapa) {
-        ultimoErroMapa = true;
-        ui.statusMapa.textContent = 'Mapa indisponível. Confira a conexão e recarregue a página.';
+  function area() { return { city: ui.city.value.trim() || 'São José dos Campos', uf: ui.state.value.trim().toUpperCase() || 'SP' }; }
+  function featureToCandidate(feature) {
+    if (!feature?.geometry?.coordinates || !Array.isArray(feature.geometry.coordinates)) return null;
+    const [lon, lat] = feature.geometry.coordinates.map(Number);
+    if (!validPoint({lat,lon})) return null;
+    const p = feature.properties || {};
+    const country = String(p.countrycode || '').toLowerCase();
+    if (country && country !== 'br') return null;
+    const road = p.street || p.name || '';
+    const city = p.city || p.town || p.locality || p.county || '';
+    if (!road) return null;
+    return { road: String(road), district: String(p.district || p.suburb || p.neighbourhood || p.city_district || ''),
+      city: String(city), uf: String(p.state || ''), postcode: String(p.postcode || ''),
+      house: String(p.housenumber || ''), lat, lon, source: 'photon' };
+  }
+  function viacepToCandidate(item) {
+    if (!item || !item.logradouro || !item.localidade) return null;
+    return { road: String(item.logradouro), district: String(item.bairro || ''), city: String(item.localidade),
+      uf: String(item.uf || ''), postcode: String(item.cep || ''), house: '', lat: null, lon: null, source: 'viacep' };
+  }
+  function score(candidate, query, userArea) {
+    const street = normalizeRoad(candidate.road), typed = normalizeRoad(query.road);
+    let value = 0;
+    if (street === typed) value += 160;
+    else if (street.startsWith(typed)) value += 90;
+    else if (street.includes(typed)) value += 42;
+    else if (typed.includes(street) && street.length >= 5) value += 25;
+    if (norm(candidate.city) === norm(userArea.city)) value += 55;
+    if (norm(candidate.district) && norm(query.extra).includes(norm(candidate.district))) value += 12;
+    if (candidate.source === 'viacep') value += 12;
+    if (candidate.lat != null) value += 8;
+    return value;
+  }
+  function formatCandidate(candidate, query, userArea) {
+    const number = query.number || candidate.house;
+    const street = `${candidate.road}${number ? `, ${number}` : ''}`;
+    const district = candidate.district ? `${candidate.district} · ` : '';
+    const city = candidate.city || userArea.city;
+    const uf = /^[A-Z]{2}$/.test(candidate.uf) ? candidate.uf : userArea.uf;
+    return { title: street, sub: `${district}${city}/${uf}${candidate.postcode ? ` · CEP ${candidate.postcode}` : ''}`,
+      address: `${street}${candidate.district ? ` — ${candidate.district}` : ''} — ${city}/${uf}`,
+      number, uf, city };
+  }
+  function mergeCandidates(a, b) {
+    const merged = new Map();
+    for (const c of [...a, ...b]) {
+      const key = [norm(c.road), norm(c.district), norm(c.city)].join('|');
+      const prev = merged.get(key);
+      if (!prev) merged.set(key, c);
+      else merged.set(key, { ...prev, ...c,
+        // ViaCEP is preferred for bairro and CEP, Photon for coordinates.
+        district: prev.source === 'viacep' ? prev.district || c.district : c.source === 'viacep' ? c.district || prev.district : prev.district || c.district,
+        postcode: prev.postcode || c.postcode,
+        lat: prev.lat ?? c.lat, lon: prev.lon ?? c.lon,
+        house: prev.house || c.house,
+        source: prev.lat != null || c.lat != null ? 'combined' : 'viacep' });
+    }
+    return [...merged.values()];
+  }
+
+  function hideSuggestions() {
+    ui.listbox.classList.add('hidden');
+    ui.input.setAttribute('aria-expanded', 'false');
+    ui.input.setAttribute('aria-activedescendant', '');
+    highlighted = -1;
+  }
+  function renderSuggestions(query, candidates, userArea, waiting = false) {
+    const ordered = candidates.map(c => ({ c, rank: score(c, query, userArea) })).sort((a,b) => b.rank - a.rank).slice(0, 8).map(x=>x.c);
+    currentSuggestions = ordered;
+    highlighted = -1;
+    ui.listbox.replaceChildren();
+    if (!ordered.length) {
+      const box = document.createElement('div'); box.className = 'suggestion-empty';
+      box.textContent = waiting ? 'Buscando endereços e bairros...' : 'Nenhuma sugestão encontrada. Tente incluir o bairro ou selecionar outra cidade.';
+      ui.listbox.appendChild(box);
+    }
+    ordered.forEach((candidate, index) => {
+      const info = formatCandidate(candidate, query, userArea);
+      const button = document.createElement('button');
+      button.type = 'button'; button.className = 'suggestion'; button.id = `suggestion-${index}`;
+      button.setAttribute('role', 'option'); button.setAttribute('aria-selected', 'false');
+      const icon = document.createElement('span'); icon.className = 'pin'; icon.textContent = '⌖';
+      const body = document.createElement('span');
+      const title = document.createElement('strong'); title.textContent = info.title;
+      const sub = document.createElement('small'); sub.textContent = info.sub;
+      body.append(title, sub);
+      if (query.number && !(candidate.house && norm(candidate.house) === norm(query.number))) {
+        const warn = document.createElement('em'); warn.textContent = 'Número informado por você · posição do imóvel não confirmada';
+        body.appendChild(warn);
       }
+      button.append(icon, body);
+      button.addEventListener('pointerdown', event => event.preventDefault());
+      button.addEventListener('click', () => chooseSuggestion(candidate, query, userArea));
+      ui.listbox.appendChild(button);
     });
-    mapa.on('dragstart', () => { acompanharGPS = false; });
-  } catch (erro) {
-    console.error('Mapa indisponível:', erro);
-    ui.statusMapa.textContent = 'Não foi possível abrir o mapa neste aparelho.';
+    ui.listbox.classList.remove('hidden');
+    ui.input.setAttribute('aria-expanded', 'true');
   }
-}
-function linhaVazia() { return { type:'FeatureCollection', features:[] }; }
-function definirLinha(coords, aproximada) {
-  if (!mapPronto) return;
-  mapa.getSource('percurso')?.setData(coords.length >= 2
-    ? { type:'Feature',properties:{},geometry:{type:'LineString',coordinates:coords} } : linhaVazia());
-  mapa.setPaintProperty('percurso-tracado','line-dasharray',aproximada ? [1,2] : [1,0.08]);
-}
-function atualizarLinha() {
-  if (!mapPronto) return;
-  definirLinha(rotaOtimizada() ? planejamento.coordenadas : [], Boolean(planejamento?.linhaAproximada));
-}
-function criarPin(texto, tipo) {
-  const el = document.createElement('div'); el.className=`map-pin ${tipo}`;
-  el.textContent=String(texto); return el;
-}
-function desenharMarcadores() {
-  if (!mapPronto) return;
-  marcadores.forEach(m => m.remove()); marcadores=[];
-  const inicio = new maplibregl.Marker({ element:criarPin('⌂','origem'),anchor:'center' })
-    .setLngLat([origem.lon,origem.lat])
-    .setPopup(new maplibregl.Popup({offset:20}).setHTML(`<b>Ponto de partida</b><br>${htmlSeguro(origem.endereco)}`)).addTo(mapa);
-  marcadores.push(inicio);
-  const proxima = rotaIniciada ? paradas.find(p=>!p.concluida) : null;
-  paradas.forEach((p,i) => {
-    const tipo = p.concluida ? 'concluida' : (proxima?.id===p.id ? 'proxima' : 'parada');
-    const pin = new maplibregl.Marker({ element:criarPin(i+1,tipo),anchor:'center' })
-      .setLngLat([p.lon,p.lat]).setPopup(new maplibregl.Popup({offset:20})
-        .setHTML(`<b>Parada ${i+1}</b><br>${htmlSeguro(p.endereco)}<br><small>${p.precisao==='entrada'?'Entrada predial mapeada':p.precisao==='confirmado'?'Número localizado — acesso pela rua':'Ponto aproximado na rua'}</small>`))
-      .addTo(mapa);
-    marcadores.push(pin);
-  });
-}
-function enquadrar() {
-  if (!mapa || !mapPronto) return;
-  const pts = [[Number(origem.lon),Number(origem.lat)],...paradas.map(p=>[p.lon,p.lat])];
-  if (pts.length===1) mapa.easeTo({center:pts[0],zoom:14,duration:250});
-  else { const bbox=new maplibregl.LngLatBounds(pts[0],pts[0]); pts.forEach(p=>bbox.extend(p));
-    mapa.fitBounds(bbox,{padding:50,maxZoom:16,duration:400}); }
-}
-ui.btnAjustar.addEventListener('click',enquadrar);
-
-// ---------- BUSCA DE ENDEREÇOS (sem campos ou segredos técnicos para o usuário) ----------
-function interpretarEndereco(entrada) {
-  const original=String(entrada||'').trim().replace(/[—–]/g,',').replace(/\s+/g,' ');
-  const semCep=original.replace(/\b\d{5}-?\d{3}\b/g,'');
-  let rua=semCep, numero='', complemento='';
-  // Primeiro respeita a pontuação habitual: "Rua Exemplo, 264, Bairro".
-  let achado=semCep.match(/^(.*?)[,;]\s*(?:n[º°.]?\s*|n[uú]mero\s*)?(\d{1,6}[a-z]?)\b\s*[,;]?\s*(.*)$/i);
-  if (!achado) {
-    // Sem vírgula, o último token numérico pode ser o número da casa.
-    // Não confunde "Rua 7 de Setembro" com um imóvel.
-    const numeros=[...semCep.matchAll(/\b\d{1,6}[a-z]?\b/gi)].filter(m => {
-      const antes=semCep.slice(0,m.index).trim();
-      const depois=semCep.slice(m.index+m[0].length).trim();
-      // Rua 7 de Setembro, Rua 13 de Maio, Rua 15: não inventar número de imóvel.
-      if (/^de\b/i.test(depois)) return false;
-      if (!/[a-záàâãéêíóôõúç]{3,}/i.test(antes.replace(/^(rua|av(?:enida)?|travessa)\s+/i,''))) return false;
-      return true;
-    });
-    const ultimo=numeros.at(-1);
-    if (ultimo) {
-      achado=[null,semCep.slice(0,ultimo.index),ultimo[0],semCep.slice(ultimo.index+ultimo[0].length)];
+  function chooseSuggestion(candidate, query, userArea) {
+    // Selecting a result cancels in-flight autocomplete: late responses must not reopen the menu.
+    searchSeq++;
+    clearTimeout(searchTimer);
+    searchController?.abort();
+    ui.searchLoading.classList.add('hidden');
+    const info = formatCandidate(candidate, query, userArea);
+    selected = { ...candidate, ...info, typedNumber: query.number, precision: candidate.house && norm(candidate.house) === norm(query.number) && query.number ? 'exata' : 'aproximada' };
+    ui.input.value = info.address;
+    hideSuggestions();
+    textStatus(query.number ? 'Endereço selecionado. Clique em Adicionar entrega.' : 'Endereço selecionado. Você já pode adicionar.');
+    ui.add.focus();
+  }
+  async function getPhotonCandidates(query, userArea, signal) {
+    const requested = `${query.road}, ${userArea.city}, ${userArea.uf}, Brasil`;
+    const url = `${CFG.photon}/api/?q=${encodeURIComponent(requested)}&lat=${origin.lat}&lon=${origin.lon}&limit=12&lang=pt`;
+    const data = await photonJSON(url, signal);
+    return (Array.isArray(data.features) ? data.features : []).map(featureToCandidate).filter(Boolean);
+  }
+  async function getViaCepCandidates(query, userArea, signal) {
+    const road = query.road.replace(/^(rua|avenida|av\.?|travessa|alameda|praca|praça)\s+/i,'').trim();
+    if (road.length < 3 || userArea.city.length < 3 || !/^[A-Z]{2}$/.test(userArea.uf)) return [];
+    const url = `${CFG.viaCep}/${encodeURIComponent(userArea.uf)}/${encodeURIComponent(userArea.city)}/${encodeURIComponent(road)}/json/`;
+    const data = await getJSONRemote(url, { signal, timeout: 7000 });
+    return (Array.isArray(data) ? data : []).map(viacepToCandidate).filter(Boolean);
+  }
+  async function runSearch() {
+    const query = parseAddress(ui.input.value);
+    const userArea = area();
+    if (query.road.length < 3) { hideSuggestions(); ui.searchLoading.classList.add('hidden'); return; }
+    const seq = ++searchSeq;
+    searchController?.abort();
+    const controller = new AbortController(); searchController = controller;
+    const cacheKey = `${norm(query.road)}|${norm(userArea.city)}|${userArea.uf}`;
+    if (searchCache.has(cacheKey)) {
+      renderSuggestions(query, searchCache.get(cacheKey), userArea);
+      return;
     }
+    ui.searchLoading.classList.remove('hidden');
+    renderSuggestions(query, [], userArea, true);
+    let collected = [];
+    let success = 0;
+    const receive = candidates => {
+      if (seq !== searchSeq || controller.signal.aborted) return;
+      success++;
+      collected = mergeCandidates(collected, candidates);
+      renderSuggestions(parseAddress(ui.input.value), collected, userArea, true);
+    };
+    const requests = [getPhotonCandidates(query, userArea, controller.signal), getViaCepCandidates(query, userArea, controller.signal)];
+    await Promise.allSettled(requests.map(p => p.then(receive)));
+    if (seq !== searchSeq || controller.signal.aborted) return;
+    searchCache.set(cacheKey, collected);
+    if (searchCache.size > 70) searchCache.delete(searchCache.keys().next().value);
+    ui.searchLoading.classList.add('hidden');
+    renderSuggestions(parseAddress(ui.input.value), collected, userArea);
+    if (!collected.length && success === 0) textStatus('Os serviços de busca não responderam. Verifique a conexão e tente novamente.', true);
+    else if (!collected.length) textStatus('Não encontramos a rua. Tente acrescentar bairro ou mudar a cidade.', true);
   }
-  if (achado) {
-    rua=achado[1].trim().replace(/\b(?:n|nº|n°|numero|número)\.?$/i,'').replace(/[\s,;-]+$/,'');
-    numero=achado[2]; complemento=achado[3].replace(/^[\s,;-]+/,'').trim();
+  function inputChange() {
+    clearTimeout(searchTimer);
+    selected = null;
+    searchSeq++;
+    searchController?.abort();
+    ui.searchLoading.classList.add('hidden');
+    const query = parseAddress(ui.input.value);
+    if (query.road.length < 3) { hideSuggestions(); textStatus('Digite pelo menos 3 letras da rua.'); return; }
+    // Invalidate previous results, but respond instantly from cache when only the house number changes.
+    const userArea = area();
+    const cacheKey = `${norm(query.road)}|${norm(userArea.city)}|${userArea.uf}`;
+    if (searchCache.has(cacheKey)) renderSuggestions(query, searchCache.get(cacheKey), userArea);
+    else { hideSuggestions(); ui.listbox.replaceChildren(); }
+    textStatus('Buscando sugestões de ruas e bairros...');
+    searchTimer = setTimeout(runSearch, CFG.debounceMs);
   }
-  // Aceita cidades fora do Vale do Paraíba quando informadas com separação clara.
-  // Ex.: "Rua das Flores, 123, Centro, Campinas - SP".
-  const blocos=complemento.split(',').map(x=>x.trim()).filter(Boolean);
-  let cidade=CONFIG.cidadePadrao,bairro=complemento,uf=CONFIG.ufPadrao;
-  const ultimaParte=blocos.at(-1)||'';
-  const cidadeUF=ultimaParte.match(/^(.+?)\s*[-/]\s*([A-Za-z]{2})$/);
-  if(cidadeUF){
-    cidade=cidadeUF[1].trim(); uf=cidadeUF[2].toUpperCase();
-    bairro=blocos.slice(0,-1).join(', ');
-  }else if(blocos.length>=2 && /^[A-Za-z]{2}$/.test(ultimaParte)){
-    uf=ultimaParte.toUpperCase();cidade=blocos.at(-2);
-    bairro=blocos.slice(0,-2).join(', ');
-  }else{
-    const conhecida=complemento.match(/(?:^|,|\s)(São José dos Campos|Jacareí|Caçapava|Taubaté|Pindamonhangaba)(?:\s*[,\/-]\s*(SP))?\s*$/i);
-    if(conhecida){cidade=conhecida[1];bairro=complemento.slice(0,conhecida.index).replace(/[\s,;]+$/,'').trim();}
-  }
-  if(bairro.toUpperCase()===uf)bairro='';
-  return {rua:rua||original,numero,bairro,cidade,uf,cep:(original.match(/\b\d{5}-?\d{3}\b/)||[])[0]||''};
-}
-function camposAtuais() {
-  return {rua:ui.reviewRua.value.trim(), numero:ui.reviewNumero.value.trim(),
-    bairro:ui.reviewBairro.value.trim(), cidade:ui.reviewCidade.value.trim(),
-    uf:ui.reviewUf.value.trim().toUpperCase(), cep:ui.reviewCep.value.trim(),
-    notas:ui.reviewNotas.value.trim(),urgente:ui.reviewPrioridade.checked,
-    tempoParada:Math.min(120,Math.max(0,Number(ui.reviewTempo.value)||0))};
-}
-function enderecoCompleto(c) {
-  return [c.rua+(c.numero?`, ${c.numero}`:''),c.bairro,`${c.cidade} - ${c.uf}`,c.cep?`CEP ${c.cep}`:'']
-    .filter(Boolean).join(' — ');
-}
-function pesquisaCompleta(c) { return [c.rua,c.numero,c.bairro,c.cidade,c.uf,'Brasil'].filter(Boolean).join(', '); }
-const ESTADOS_BR = Object.freeze({
-  acre:'AC', alagoas:'AL', amapa:'AP', amazonas:'AM', bahia:'BA', ceara:'CE',
-  'distrito federal':'DF', 'espirito santo':'ES', goias:'GO', maranhao:'MA',
-  'mato grosso':'MT', 'mato grosso do sul':'MS', 'minas gerais':'MG', para:'PA',
-  paraiba:'PB', parana:'PR', pernambuco:'PE', piaui:'PI', 'rio de janeiro':'RJ',
-  'rio grande do norte':'RN', 'rio grande do sul':'RS', rondonia:'RO', roraima:'RR',
-  'santa catarina':'SC', 'sao paulo':'SP', sergipe:'SE', tocantins:'TO'
-});
-function obterUF(estado) {
-  const nome=normalizar(estado);
-  return nome.length===2 ? nome.toUpperCase() : ESTADOS_BR[nome]||'';
-}
-function tratarPhoton(feature) {
-  const p=feature?.properties||{}, arr=feature?.geometry?.coordinates||[];
-  // O Photon pode representar uma rua como name, street ou ainda como um endereço de casa.
-  const rua=p.street||(['street','house'].includes(p.type)||p.housenumber?p.name:'');
-  if (typeof rua!=='string' || !rua.trim() || !Number.isFinite(arr[0]) || !Number.isFinite(arr[1])) return null;
-  return {rua:rua.trim(),numero:String(p.housenumber||''),bairro:p.district||p.locality||p.suburb||'',
-    cidade:p.city||p.municipality||'',uf:obterUF(p.state),cep:p.postcode||'',
-    pais:String(p.countrycode||'').toUpperCase(),lat:Number(arr[1]),lon:Number(arr[0])};
-}
-function pontuarCandidato(c,campos) {
-  if (!mesmaRua(c.rua,campos.rua) || (c.pais && c.pais !== 'BR')) return -1000;
-  const cidadeOk = !campos.cidade || !c.cidade || normalizar(c.cidade)===normalizar(campos.cidade);
-  if (!cidadeOk || (campos.uf && c.uf && campos.uf!==c.uf)) return -1000;
-  const bairroOk = !campos.bairro || !c.bairro || normalizar(c.bairro)===normalizar(campos.bairro);
-  const numeroOk = !!(campos.numero && mesmoNumero(campos.numero,c.numero));
-  return 30+(c.cidade?14:0)+(bairroOk?8:-12)+(numeroOk?36:0)+(c.numero&&!numeroOk?-12:0);
-}
-function ordenarResultados(lista,campos) {
-  const visto=new Set();
-  return lista.filter(Boolean).filter(c=> {
-    const key=[normalizar(c.rua),normalizar(c.bairro),normalizar(c.cidade),c.numero,c.lat.toFixed(5),c.lon.toFixed(5)].join('|');
-    if(visto.has(key)) return false; visto.add(key); return pontuarCandidato(c,campos)>-500;
-  }).sort((a,b)=>pontuarCandidato(b,campos)-pontuarCandidato(a,campos)).slice(0,8);
-}
-async function photon(url, signal) {
-  // Fila serial: não disparamos requisições de autocomplete a cada tecla.
-  let resultado;
-  const job = filaBusca.then(async () => {
-    const espera=Math.max(0, CONFIG.intervaloMinBusca-(Date.now()-ultimaChamadaPhoton));
-    if (espera) await new Promise(r=>setTimeout(r,espera));
-    if (signal?.aborted) throw new DOMException('Busca cancelada','AbortError');
-    ultimaChamadaPhoton=Date.now();
-    const r=await fetchComTimeout(url,{signal});
-    if(!r.ok) throw new Error('A pesquisa de endereços está temporariamente indisponível.');
-    resultado=await r.json();
+  ui.input.addEventListener('input', inputChange);
+  ui.input.addEventListener('focus', () => {
+    if (selected) return;
+    const q = parseAddress(ui.input.value), a = area();
+    const key = `${norm(q.road)}|${norm(a.city)}|${a.uf}`;
+    if (searchCache.has(key)) renderSuggestions(q, searchCache.get(key), a);
   });
-  filaBusca=job.catch(()=>{});
-  await job; return resultado;
-}
-async function pesquisarPhoton(texto,{signal,limite=10}={}) {
-  const params=new URLSearchParams({q:texto,lang:'pt',limit:String(limite),countrycode:'BR',lat:String(origem.lat),lon:String(origem.lon)});
-  const dados=await photon(`${CONFIG.photon}/api/?${params}`,signal);
-  return (dados.features||[]).map(tratarPhoton).filter(Boolean);
-}
-async function sugestoesBusca(termo,signal) {
-  const campos=interpretarEndereco(termo);
-  const cacheKey=normalizar(termo);
-  if (cacheBusca.has(cacheKey)) return cacheBusca.get(cacheKey);
-
-  // Fundamental: o número não é um termo de pesquisa de NOME DA RUA.
-  // A sugestão de rua recebe o número digitado somente na interface, e a confirmação
-  // tentará geocodificar a residência específica. Evita "Rua Votuporanga 264" → zero resultados.
-  // Primeiro tenta achar o número digitado; se o serviço não conhecer o imóvel,
-  // busca a rua e mantém o número no texto exibido, sem fingir precisão de fachada.
-  const pesquisas = campos.numero ? [
-    [campos.rua, campos.numero, campos.bairro, campos.cidade].filter(Boolean).join(', '),
-    [campos.rua, campos.cidade].filter(Boolean).join(', '),
-    campos.rua
-  ] : [
-    [campos.rua, campos.cidade].filter(Boolean).join(', '),
-    campos.rua
-  ];
-  let ordenados=[];
-  let ultimoErro=null;
-  for(const texto of [...new Set(pesquisas.filter(x=>x.length>=3))]) {
-    if(signal?.aborted)throw new DOMException('Busca cancelada','AbortError');
-    try {
-      const lista=await pesquisarPhoton(texto,{signal,limite:15});
-      ordenados=ordenarResultados([...ordenados,...lista],campos);
-      if(ordenados.length)break;
-    } catch(e) { if(e.name==='AbortError')throw e;ultimoErro=e; }
-  }
-  if(!ordenados.length && ultimoErro) throw ultimoErro;
-  cacheBusca.set(cacheKey,ordenados);
-  if(cacheBusca.size>60)cacheBusca.delete(cacheBusca.keys().next().value);
-  return ordenados;
-}
-function fecharSugestoes() {
-  ui.sugestoes.replaceChildren(); ui.sugestoes.classList.add('hidden');
-  ui.endereco.setAttribute('aria-expanded','false'); ui.endereco.removeAttribute('aria-activedescendant');
-  sugestaoDestacada=-1; sugestoesAtuais=[];
-}
-function cancelarBusca() {
-  clearTimeout(debounceBusca);
-  if(buscaController) buscaController.abort(); buscaController=null;
-  buscaSequencia++;
-  ui.searchSpinner.classList.add('hidden');
-}
-function mostrarSugestoes(termo,resultados) {
-  fecharSugestoes(); sugestoesAtuais=resultados;
-  if(!resultados.length) {
-    const p=document.createElement('p');p.className='suggestion-empty';
-    p.textContent='Sem sugestões por enquanto. Confira a digitação e tente adicionar o endereço.';
-    ui.sugestoes.append(p);
-  } else resultados.forEach((d,i)=>{
-    const b=document.createElement('button');b.type='button';b.className='suggestion';
-    b.setAttribute('role','option');b.id=`sugestao-${i}`;
-    const ico=document.createElement('i');ico.className='fa-solid fa-location-dot';
-    const bloco=document.createElement('span');
-    const titulo=document.createElement('strong');
-    const leitura=interpretarEndereco(termo);
-    const numeroExibido=leitura.numero||d.numero;
-    titulo.textContent=d.rua+(numeroExibido?`, ${numeroExibido}`:'');
-    const sub=document.createElement('small');
-    sub.textContent=[d.bairro||leitura.bairro,d.cidade||leitura.cidade,d.uf||leitura.uf].filter(Boolean).join(' · ');
-    bloco.append(titulo,sub);
-    if(numeroExibido && !mesmoNumero(d.numero,numeroExibido)) {
-      const em=document.createElement('em');em.textContent='Número preservado · localização aproximada';bloco.append(em);
-    } else if(numeroExibido) {
-      const em=document.createElement('em');em.className='number-found';em.textContent='Número encontrado';bloco.append(em);
-    }
-    b.append(ico,bloco);
-    b.addEventListener('click',()=>selecionarSugestao(d,termo));
-    ui.sugestoes.append(b);
+  ui.input.addEventListener('keydown', event => {
+    if (ui.listbox.classList.contains('hidden') || !currentSuggestions.length) return;
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      event.preventDefault();
+      highlighted = (highlighted + (event.key === 'ArrowDown' ? 1 : -1) + currentSuggestions.length) % currentSuggestions.length;
+      const options = [...ui.listbox.querySelectorAll('[role=option]')];
+      options.forEach((option,i) => { option.classList.toggle('active', i === highlighted); option.setAttribute('aria-selected', String(i === highlighted)); });
+      ui.input.setAttribute('aria-activedescendant', options[highlighted]?.id || '');
+      options[highlighted]?.scrollIntoView({block:'nearest'});
+    } else if (event.key === 'Enter' && highlighted >= 0) {
+      event.preventDefault(); chooseSuggestion(currentSuggestions[highlighted], parseAddress(ui.input.value), area());
+    } else if (event.key === 'Escape') { hideSuggestions(); }
   });
-  ui.sugestoes.classList.remove('hidden'); ui.endereco.setAttribute('aria-expanded','true');
-}
-async function buscarSugestoes(termo) {
-  const seq=++buscaSequencia;
-  if(buscaController) buscaController.abort();
-  buscaController=new AbortController();
-  ui.searchSpinner.classList.remove('hidden');
-  try {
-    const resultados=await sugestoesBusca(termo,buscaController.signal);
-    if(seq!==buscaSequencia || termo!==ui.endereco.value.trim())return;
-    mostrarSugestoes(termo,resultados);
-    if(resultados.length) aviso('Toque no endereço correto para preencher a entrega.');
-  } catch(e) {
-    if(e.name!=='AbortError' && seq===buscaSequencia) {
-      fecharSugestoes(); aviso('A busca automática não respondeu. Você pode preencher o endereço manualmente.',true);
-    }
-  } finally { if(seq===buscaSequencia)ui.searchSpinner.classList.add('hidden'); }
-}
-// Uma sugestão preenchida só vale enquanto o usuário não editar o texto.
-ui.endereco.addEventListener('input',()=>{
-  enderecoSelecionado=null;
-  cancelarBusca(); fecharSugestoes(); fecharRevisao();
-  const termo=ui.endereco.value.trim();
-  if(termo.length<4)return;
-  debounceBusca=setTimeout(()=>buscarSugestoes(termo),CONFIG.sugestaoDelay);
-});
-ui.endereco.addEventListener('keydown',e=>{
-  const botoes=[...ui.sugestoes.querySelectorAll('[role="option"]')];
-  if(!botoes.length || ui.sugestoes.classList.contains('hidden'))return;
-  if(e.key==='ArrowDown'||e.key==='ArrowUp') {
-    e.preventDefault();sugestaoDestacada=(sugestaoDestacada+(e.key==='ArrowDown'?1:-1)+botoes.length)%botoes.length;
-    botoes.forEach((b,i)=>b.classList.toggle('is-focused',i===sugestaoDestacada));
-    ui.endereco.setAttribute('aria-activedescendant',botoes[sugestaoDestacada].id);
-  } else if(e.key==='Enter' && sugestaoDestacada>=0) {e.preventDefault();botoes[sugestaoDestacada].click();}
-  else if(e.key==='Escape') fecharSugestoes();
-});
-document.addEventListener('click',e=>{if(!ui.endereco.closest('.search-area').contains(e.target))fecharSugestoes();});
-
-// A experiência de cadastro não possui tela de revisão: selecionar preenche tudo;
-// clicar em "Adicionar entrega" salva e atualiza a lista de paradas.
-function selecionarSugestao(sugestao, textoDigitado) {
-  const digitado=interpretarEndereco(textoDigitado);
-  const campos={
-    rua:sugestao.rua||digitado.rua,
-    numero:digitado.numero||sugestao.numero||'',
-    bairro:sugestao.bairro||digitado.bairro||'',
-    cidade:sugestao.cidade||digitado.cidade||CONFIG.cidadePadrao,
-    uf:sugestao.uf||digitado.uf||CONFIG.ufPadrao,
-    cep:sugestao.cep||digitado.cep||''
-  };
-  const texto=enderecoCompleto(campos);
-  // Cancela respostas antigas antes de atualizar o input sem disparar evento input.
-  cancelarBusca();fecharSugestoes();fecharRevisao();
-  enderecoSelecionado={campos,ponto:sugestao,texto};
-  ui.endereco.value=texto;
-  aviso(campos.numero&&!mesmoNumero(campos.numero,sugestao.numero)
-    ? 'Endereço preenchido. Número mantido; posição aproximada. Clique em Adicionar entrega.'
-    : 'Endereço preenchido. Clique em Adicionar entrega.');
-  ui.btnAdicionar.focus();
-}
-
-function dadosDaSugestao(campos, ponto) {
-  if(!ponto || !coordenadasValidas(ponto) || !mesmaRua(ponto.rua,campos.rua)) return null;
-  // A posição do imóvel só é confirmada se a origem conhece o mesmo número.
-  const exato=Boolean(campos.numero && mesmoNumero(campos.numero,ponto.numero) &&
-    (!campos.cidade||!ponto.cidade||normalizar(campos.cidade)===normalizar(ponto.cidade)) &&
-    (!campos.uf||!ponto.uf||campos.uf===ponto.uf));
-  return {
-    lat:ponto.lat,lon:ponto.lon,precisao:exato?'confirmado':'aproximado',
-    acesso:{fonte:exato?'numero_geocodificado':'referencia_da_rua',
-      viaConfirmada:false,distanciaAteVia:null,
-      pontoImovel:{lat:ponto.lat,lon:ponto.lon}}
-  };
-}
-
-async function localizarDigitadoSemSugestao(texto,signal) {
-  const campos=interpretarEndereco(texto);
-  if(campos.rua.length<3) throw new Error('Digite pelo menos o nome da rua.');
-  // Apenas uma busca de endereço: não obriga o usuário a preencher campos extras.
-  const lista=await sugestoesBusca(texto,signal);
-  const melhor=lista[0];
-  if(!melhor) throw new Error('Não encontramos essa rua. Confira a cidade ou escolha uma sugestão.');
-  return {campos:{
-    rua:melhor.rua,
-    numero:campos.numero||melhor.numero||'',
-    bairro:melhor.bairro||campos.bairro||'',
-    cidade:melhor.cidade||campos.cidade||CONFIG.cidadePadrao,
-    uf:melhor.uf||campos.uf||CONFIG.ufPadrao,
-    cep:melhor.cep||campos.cep||''
-  },ponto:melhor};
-}
-
-function adicionarDiretamente(campos,local) {
-  const endereco=enderecoCompleto(campos);
-  paradas.push({
-    id:`${Date.now()}-${Math.random().toString(36).slice(2,8)}`,
-    endereco,lat:local.lat,lon:local.lon,precisao:local.precisao,
-    campos:{rua:campos.rua,numero:campos.numero,bairro:campos.bairro,
-      cidade:campos.cidade,uf:campos.uf,cep:campos.cep},
-    acesso:local.acesso,notas:'',urgente:false,tempoParada:0,concluida:false
+  document.addEventListener('pointerdown', event => {
+    if (!ID('address-wrap').contains(event.target)) hideSuggestions();
   });
-  enderecoSelecionado=null;
-  textoOriginalBusca='';
-  ui.endereco.value='';
-  cancelarBusca();fecharSugestoes();fecharRevisao();
-  invalidarPlano();renderizar();
-  aviso(local.precisao==='aproximado'
-    ? 'Entrega adicionada! Número mantido, localização aproximada da rua.'
-    : 'Entrega adicionada! Pode cadastrar o próximo endereço.');
-  ui.endereco.focus();
-}
+  for (const input of [ui.city, ui.state]) input.addEventListener('change', () => { selected = null; inputChange(); save(); });
 
-ui.form.addEventListener('submit',async e=>{
-  e.preventDefault();
-  if(cadastroEmCurso)return;
-  const texto=ui.endereco.value.trim();
-  if(texto.length<3)return;
-  cadastroEmCurso=true;
-  cancelarBusca();fecharSugestoes();
-  busy(ui.btnAdicionar,true,'Adicionando...');
-  try {
-    let selecionado=enderecoSelecionado&&enderecoSelecionado.texto===texto
-      ? enderecoSelecionado:null;
-    if(!selecionado) {
-      aviso('Localizando o endereço...');
-      const controlador=new AbortController();
-      const t=setTimeout(()=>controlador.abort(),8000);
+  // ---- Obtain coordinates. Never present an inserted house number as confirmed unless Photon returned it. ----
+  async function resolveCoordinates(candidate, userArea, signal) {
+    const parsed = parseAddress(candidate.address || ui.input.value);
+    const house = candidate.typedNumber || candidate.number || parsed.number;
+    const road = candidate.road || parsed.road;
+    const city = candidate.city || userArea.city;
+    const uf = /^[A-Z]{2}$/.test(candidate.uf || '') ? candidate.uf : userArea.uf;
+    const originalPoint = validPoint(candidate) ? { lat: Number(candidate.lat), lon: Number(candidate.lon) } : null;
+    if (candidate.precision === 'exata' && originalPoint) return { ...originalPoint, precision: 'exata' };
+    // Structured Photon search is the only extra call; when the house is not mapped, preserve road position.
+    if (house) {
       try {
-        const localizado=await localizarDigitadoSemSugestao(texto,controlador.signal);
-        selecionado={...localizado,texto};
-      } finally {clearTimeout(t);}
+        const url = `${CFG.photon}/structured?street=${encodeURIComponent(road)}&housenumber=${encodeURIComponent(house)}&city=${encodeURIComponent(city)}&state=${encodeURIComponent(uf)}&countrycode=BR&limit=5`;
+        const res = await photonJSON(url, signal);
+        for (const feature of res.features || []) {
+          const props = feature.properties || {};
+          const found = featureToCandidate(feature);
+          if (found && norm(props.housenumber) === norm(house) && normalizeRoad(found.road) === normalizeRoad(road) && (!found.city || norm(found.city) === norm(city))) {
+            return { lat: found.lat, lon: found.lon, precision: 'exata' };
+          }
+        }
+      } catch (error) { if (signal?.aborted) throw error; console.warn('Consulta do número indisponível:', error); }
     }
-    const local=dadosDaSugestao(selecionado.campos,selecionado.ponto);
-    if(!local) throw new Error('Localização inválida. Selecione outro endereço da lista.');
-    // Sem consultas adicionais: a seleção já contém coordenadas suficientes para cadastrar.
-    adicionarDiretamente(selecionado.campos,local);
-  } catch (erro) {
-    console.warn('Cadastro de endereço:',erro);
-    aviso(erro.name==='AbortError'
-      ? 'A busca demorou. Escolha uma sugestão ou tente novamente.'
-      : (erro.message||'Não foi possível encontrar esse endereço.'),true);
-  } finally {cadastroEmCurso=false;busy(ui.btnAdicionar,false);}
-});
-
-function precisão(tipo,msg) {
-  ui.precisao.className=`accuracy-message ${tipo==='alerta'?'is-warning':tipo==='ok'?'is-success':''}`;
-  ui.precisao.replaceChildren();
-  const ic=document.createElement('i');ic.className=`fa-solid ${tipo==='ok'?'fa-circle-check':tipo==='alerta'?'fa-triangle-exclamation':'fa-circle-info'}`;
-  const p=document.createElement('span');p.textContent=msg;ui.precisao.append(ic,p);
-}
-function cancelarConferencia() {
-  revisaoVersao++;
-  revisaoController?.abort(); revisaoController=null;
-  busy(ui.btnConfirmar,false);
-}
-function fecharRevisao() {
-  cancelarConferencia(); ui.revisao.classList.add('hidden'); idEmEdicao=null;
-  sugestaoSelecionada=null;
-}
-function prepararRevisao(sugestao=null, paradaExistente=null) {
-  enderecoSelecionado=null;
-  cancelarBusca();fecharSugestoes();fecharRevisao();
-  sugestaoSelecionada=sugestao || (paradaExistente?.campos ? {
-    ...paradaExistente.campos,lat:paradaExistente.lat,lon:paradaExistente.lon,
-    pais:'BR'
-  } : null); // referência estável; editar o número NÃO reaproveita precisão anterior.
-  idEmEdicao=paradaExistente?.id||null;
-  const digitado=paradaExistente?.campos||interpretarEndereco(textoOriginalBusca||ui.endereco.value);
-  let bairroDigitado=digitado.bairro||'';
-  // Quando a pessoa informa a cidade no final, não confundi-la com o bairro.
-  if (sugestao?.cidade && bairroDigitado) {
-    const cidadeNorm=normalizar(sugestao.cidade);
-    const semEstado=bairroDigitado.replace(/(?:\s*[,/-]\s*|\s+)[A-Z]{2}\s*$/,'').trim();
-    if(normalizar(semEstado)===cidadeNorm)bairroDigitado='';
-    else if(normalizar(semEstado).endsWith(` ${cidadeNorm}`))
-      bairroDigitado=semEstado.slice(0,-sugestao.cidade.length).replace(/[\s,/-]+$/,'');
+    if (originalPoint) return { ...originalPoint, precision: 'aproximada' };
+    const q = { road, number: house, extra: candidate.district || '', raw: road };
+    const matches = await getPhotonCandidates(q, { city, uf }, signal);
+    const suitable = matches.sort((a,b) => score(b,q,{city,uf})-score(a,q,{city,uf})).find(c =>
+      normalizeRoad(c.road) === normalizeRoad(road) && (!c.city || norm(c.city) === norm(city)));
+    if (!suitable) throw new Error('Encontrei a rua no cadastro, mas não consegui posicioná-la no mapa. Tente selecionar outra sugestão.');
+    return { lat: suitable.lat, lon: suitable.lon, precision: 'aproximada' };
   }
-  const dado={rua:sugestao?.rua||digitado.rua,numero:digitado.numero||sugestao?.numero||'',
-    bairro:bairroDigitado||sugestao?.bairro||'',cidade:sugestao?.cidade||digitado.cidade||CONFIG.cidadePadrao,
-    uf:sugestao?.uf||digitado.uf||'SP',cep:digitado.cep||sugestao?.cep||''};
-  for(const [chave,input] of Object.entries({rua:ui.reviewRua,numero:ui.reviewNumero,bairro:ui.reviewBairro,
-    cidade:ui.reviewCidade,uf:ui.reviewUf,cep:ui.reviewCep}))input.value=dado[chave]||'';
-  ui.revisao.classList.remove('hidden');
-  ui.endereco.value=enderecoCompleto(dado);
-  precisão('normal', idEmEdicao ? 'Confira o número e confirme a nova localização.'
-    : 'Corrija os dados e salve a alteração.');
-  ui.reviewNotas.value=paradaExistente?.notas||'';
-  ui.reviewPrioridade.checked=Boolean(paradaExistente?.urgente);
-  ui.reviewTempo.value=String(paradaExistente?.tempoParada||0);
-  ui.btnConfirmar.innerHTML=`<i class="fa-solid fa-check"></i> ${idEmEdicao?'Salvar alterações':'Salvar alterações'}`;
-  ui.revisao.scrollIntoView({behavior:'smooth',block:'nearest'});
-  if(sugestao&&mapPronto&&mapa) mapa.flyTo({center:[sugestao.lon,sugestao.lat],zoom:16,duration:450});
-}
-// Ao editar uma parada existente, buscamos novamente sua localização.
-async function geocodificarRevisado(campos, signal, referencia = null) {
-  // 1) Busca a casa exata (quando cadastrada na base). Respostas sem número NUNCA são chamadas de exatas.
-  let resultados=[];
-  if(campos.numero) {
-    const params=new URLSearchParams({street:campos.rua,housenumber:campos.numero,
-      city:campos.cidade,countrycode:'BR',limit:'10',lang:'pt'});
+  function stopFromCandidate(c, coordinate, fallback) {
+    const addr = c.address || c.raw || fallback;
+    return { endereco: addr, lat: coordinate.lat, lon: coordinate.lon,
+      number: c.typedNumber || c.number || parseAddress(addr).number || '',
+      city: c.city || area().city, uf: c.uf || area().uf, precision: coordinate.precision };
+  }
+  ui.form.addEventListener('submit', async event => {
+    event.preventDefault();
+    if (ui.add.disabled) return;
+    const typed = ui.input.value.trim();
+    if (typed.length < 3) { textStatus('Digite um endereço antes de adicionar.', true); ui.input.focus(); return; }
+    // Avoid accidental double click while the coordinate search is running.
+    const addressChosen = selected && selected.address === typed ? { ...selected } : null;
+    const userArea = area();
+    const parsed = parseAddress(typed);
+    const candidate = addressChosen || { road: parsed.road, typedNumber: parsed.number, number: parsed.number,
+      address: typed, city: userArea.city, uf: userArea.uf, district: parsed.extra, lat: null, lon: null };
+    const token = routeRevision;
+    const ctrl = new AbortController();
+    setBusy(ui.add, true, 'Localizando...');
+    hideSuggestions();
+    textStatus('Localizando a rua no mapa...');
     try {
-      const data=await photon(`${CONFIG.photon}/structured?${params}`,signal);
-      resultados=(data.features||[]).map(tratarPhoton).filter(Boolean);
-    } catch(e) { if(e.name==='AbortError')throw e; console.warn('Busca do número:',e); }
-  }
-
-  // 2) Usa a própria sugestão já selecionada como fallback, sem requisições extras.
-  // Isso evita que um erro no serviço de busca impeça a entrega de ser adicionada.
-  if(referencia && mesmaRua(referencia.rua,campos.rua) &&
-     (!referencia.cidade||normalizar(referencia.cidade)===normalizar(campos.cidade)) &&
-     (!referencia.uf||referencia.uf===campos.uf)) resultados.push(referencia);
-
-  let ordenados=ordenarResultados(resultados,campos);
-  let exato=ordenados.find(r=>campos.numero&&mesmoNumero(r.numero,campos.numero)&&
-    r.cidade&&normalizar(r.cidade)===normalizar(campos.cidade)&&r.uf===campos.uf&&
-    (!campos.bairro||!r.bairro||normalizar(r.bairro)===normalizar(campos.bairro)));
-
-  // 3) Se a consulta por número falhou, tenta a rua. Não precisa esperar múltiplos provedores.
-  if(!exato && !ordenados.length) {
-    for(const texto of [[campos.rua,campos.cidade].filter(Boolean).join(', '),campos.rua]) {
-      try {
-        const lista=await pesquisarPhoton(texto,{limite:12,signal});
-        ordenados=ordenarResultados([...ordenados,...lista],campos);
-        if(ordenados.length)break;
-      } catch(e) { if(e.name==='AbortError')throw e; console.warn('Busca de rua:',e); }
-    }
-  }
-  const melhor=exato||ordenados[0];
-  if(!melhor)return null;
-  return {...melhor,exato:Boolean(exato)};
-}
-// Resolve a navegação na rua correta. A entrada mapeada é opcional e não é inventada.
-function distanciaArestaMetros(p, a, b) {
-  const escalaX=111320*Math.cos(p.lat*Math.PI/180), escalaY=111320;
-  const x=(p.lon-a.lon)*escalaX,y=(p.lat-a.lat)*escalaY;
-  const dx=(b.lon-a.lon)*escalaX,dy=(b.lat-a.lat)*escalaY;
-  const t=Math.max(0,Math.min(1,(x*dx+y*dy)/Math.max(.001,dx*dx+dy*dy)));
-  return Math.hypot(x-t*dx,y-t*dy);
-}
-async function entradaPredialMapeada(campos, posicao, signal) {
-  if(!campos.numero) return null;
-  // Só aceita entrada em edifício cujo número E rua correspondam aos do pedido.
-  // Overpass/OSM não possuem entradas para todos os imóveis: ausência é normal.
-  const q=`[out:json][timeout:6];(way(around:35,${posicao.lat},${posicao.lon})["building"]["addr:housenumber"];node(around:35,${posicao.lat},${posicao.lon})["entrance"];);out geom;`;
-  try {
-    const resposta=await fetchComTimeout(`${CONFIG.overpass}?data=${encodeURIComponent(q)}`,{signal,timeout:5500});
-    if(!resposta.ok) return null;
-    const dados=await resposta.json();
-    const elementos=dados.elements||[];
-    const predios=elementos.filter(e=>e.type==='way' &&
-      mesmoNumero(e.tags?.['addr:housenumber'],campos.numero) &&
-      mesmaRua(e.tags?.['addr:street'],campos.rua) && e.geometry?.length>=3);
-    if(!predios.length)return null;
-    const entradas=elementos.filter(e=>e.type==='node'&&e.tags?.entrance &&
-      Number.isFinite(e.lat)&&Number.isFinite(e.lon));
-    const candidatas=[];
-    for(const predio of predios)for(const entrada of entradas){
-      const p={lat:entrada.lat,lon:entrada.lon};
-      const borda=Math.min(...predio.geometry.map((a,i)=>{
-        const b=predio.geometry[(i+1)%predio.geometry.length];
-        return distanciaArestaMetros(p,{lat:a.lat,lon:a.lon},{lat:b.lat,lon:b.lon});
-      }));
-      if(borda<=3) candidatas.push({lat:p.lat,lon:p.lon,
-        score:(entrada.tags.entrance==='main'?100:0)-distanciaMetros(p,posicao)});
-    }
-    candidatas.sort((a,b)=>b.score-a.score);
-    return candidatas[0]||null;
-  }catch(e){if(e.name==='AbortError')throw e;return null;}
-}
-async function encaixarNaRua(campos, posicao, signal) {
-  const url=`${CONFIG.osrm}/nearest/v1/driving/${posicao.lon},${posicao.lat}?number=5`;
-  try {
-    const resposta=await fetchComTimeout(url,{signal,timeout:3000});
-    if(!resposta.ok)throw new Error('Via indisponível');
-    const dados=await resposta.json();
-    const vias=(dados.waypoints||[]).filter(p=>Array.isArray(p.location)&&Number.isFinite(p.distance));
-    const comNome=vias.find(p=>mesmaRua(p.name,campos.rua)&&p.distance<=CONFIG.maxSnapMetros);
-    // Sem nome correspondente: só permite usar um segmento MUITO próximo.
-    // Não afirma que é a rua correta nesse caso.
-    const proxima=vias.find(p=>p.distance<=18);
-    const via=comNome||proxima;
-    if(!via)return { ...posicao, viaConfirmada:false, deslocamento:null };
-    return {lat:via.location[1],lon:via.location[0],viaConfirmada:Boolean(comNome),deslocamento:via.distance};
-  }catch(e){if(e.name==='AbortError')throw e;return { ...posicao, viaConfirmada:false, deslocamento:null };}
-}
-async function resolverPontoDeEntrega(campos, achado, signal) {
-  // O cadastro deve ser rápido. Buscar entradas prediais no Overpass a cada parada
-  // causava lentidão e bloqueios. Usamos a localização de imóvel, se conhecida,
-  // ou o ponto da rua, e tentamos alinhar com a malha viária sem impedir o cadastro.
-  const base={lat:achado.lat,lon:achado.lon};
-  const acesso=await encaixarNaRua(campos,base,signal);
-  return {
-    lat:acesso.lat,lon:acesso.lon,
-    precisao:achado.exato&&acesso.viaConfirmada?'confirmado':'aproximado',
-    acesso:{fonte:achado.exato?'numero_geocodificado':'referencia_da_rua',
-      viaConfirmada:acesso.viaConfirmada,distanciaAteVia:acesso.deslocamento,
-      pontoImovel:base}
-  };
-}
-function adicionarOuAtualizar(campos,local) {
-  const endereco=enderecoCompleto(campos);
-  const valores={endereco,lat:local.lat,lon:local.lon,precisao:local.precisao,
-    campos:{rua:campos.rua,numero:campos.numero,bairro:campos.bairro,
-      cidade:campos.cidade,uf:campos.uf,cep:campos.cep},
-    acesso:local.acesso,notas:campos.notas||'',urgente:Boolean(campos.urgente),
-    tempoParada:campos.tempoParada||0};
-  const editando=Boolean(idEmEdicao);
-  if(editando)paradas=paradas.map(p=>p.id===idEmEdicao?{...p,...valores}:p);
-  else paradas.push({id:`${Date.now()}-${Math.random().toString(36).slice(2,8)}`,
-    ...valores,concluida:false});
-  ui.endereco.value='';textoOriginalBusca='';fecharRevisao();invalidarPlano();renderizar();
-  aviso(editando?'Entrega atualizada. Otimize a rota novamente.':
-    local.precisao==='aproximado'?'Parada adicionada com ponto aproximado na rua.':
-    'Parada adicionada. Continue cadastrando seus destinos.');
-}
-ui.formRevisao.addEventListener('submit',async e=>{
-  e.preventDefault();if(ui.btnConfirmar.disabled)return;
-  const campos=camposAtuais();
-  if(!campos.rua||!campos.cidade||!campos.uf){precisão('alerta','Preencha rua, cidade e UF.');return;}
-  if(!/^[A-Z]{2}$/.test(campos.uf)){precisão('alerta','Confira a sigla do estado.');return;}
-  cancelarConferencia();const versao=revisaoVersao;
-  revisaoController=new AbortController();const signal=revisaoController.signal;
-  busy(ui.btnConfirmar,true,'Adicionando...');
-  precisão('normal','Conferindo número e ponto de entrega...');
-  try {
-    const ponto=await geocodificarRevisado(campos,signal,sugestaoSelecionada);
-    if(versao!==revisaoVersao||ui.revisao.classList.contains('hidden'))return;
-    if(!ponto){precisão('alerta','Não localizamos essa rua. Confira o nome e a cidade e tente novamente.');return;}
-    const destino=await resolverPontoDeEntrega(campos,ponto,signal);
-    if(versao!==revisaoVersao||ui.revisao.classList.contains('hidden'))return;
-    if(!coordenadasValidas(destino))throw new Error('Coordenadas inválidas');
-    adicionarOuAtualizar(campos,destino);
-  }catch(erro){
-    if(versao===revisaoVersao&&erro.name!=='AbortError'){
-      console.warn('Falha de endereço:',erro);
-      precisão('alerta','Busca indisponível. Tente novamente; se aparecer uma sugestão, selecione-a primeiro.');
-    }
-  }finally{if(versao===revisaoVersao){busy(ui.btnConfirmar,false);revisaoController=null;}}
-});
-ui.btnEditar.addEventListener('click',()=>{ui.reviewRua.focus();ui.reviewRua.select();});
-ui.btnFecharRevisao.addEventListener('click',()=>{fecharRevisao();aviso('Conferência cancelada.');});
-for(const input of [ui.reviewRua,ui.reviewNumero,ui.reviewBairro,ui.reviewCidade,ui.reviewUf,ui.reviewCep,ui.reviewNotas,ui.reviewPrioridade,ui.reviewTempo]){
-  input.addEventListener('input',()=>{
-    cancelarConferencia();
-    precisão('normal','Endereço alterado. Ao confirmar, buscamos o número novamente.');
+      const coord = await resolveCoordinates(candidate, userArea, ctrl.signal);
+      if (ui.input.value.trim() !== typed) throw new Error('O endereço foi alterado. Confirme novamente antes de salvar.');
+      if (token !== routeRevision) throw new Error('A rota mudou enquanto você adicionava o endereço. Tente novamente.');
+      const data = stopFromCandidate(candidate, coord, typed);
+      if (editingId) {
+        const i = stops.findIndex(p => p.id === editingId);
+        if (i < 0) throw new Error('Essa entrega não está mais na lista.');
+        stops[i] = { ...stops[i], ...data };
+      } else {
+        stops.push({ id: `${Date.now()}-${Math.random().toString(36).slice(2,8)}`, ...data, concluida: false });
+      }
+      const wasEditing = Boolean(editingId);
+      editingId = null;
+      ui.input.value = ''; selected = null;
+      ui.add.textContent = '＋ Adicionar entrega';
+      ui.cancelEdit.classList.add('hidden');
+      searchSeq++; searchController?.abort();
+      invalidate(); drawAll(); save();
+      textStatus(wasEditing ? 'Endereço atualizado na lista.' : 'Entrega adicionada à lista.');
+      if (coord.precision !== 'exata') showToast('Entrega salva com posição aproximada da rua.');
+    } catch (error) {
+      textStatus(error.message || 'Não conseguimos localizar este endereço. Tente uma sugestão diferente.', true);
+    } finally { setBusy(ui.add, false, ''); if (!editingId) ui.add.textContent = '＋ Adicionar entrega'; }
   });
-}
-// Os campos de notas não invalidam a posição enquanto a pesquisa está em andamento.
-// ---------- PARADAS E RESUMO ----------
-function renderizar() {
-  const feitas=paradas.filter(p=>p.concluida).length;
-  const pendentes=paradas.length-feitas;
-  const percentual=paradas.length?Math.round(feitas/paradas.length*100):0;
-  const pronta=rotaOtimizada();
-  ui.contador.textContent=`${paradas.length} ${paradas.length===1?'parada':'paradas'}`;
-  ui.resumo.textContent=paradas.length
-    ? `${pendentes} pendente${pendentes!==1?'s':''} · ${feitas} concluída${feitas!==1?'s':''}`
-    : 'Nenhum endereço adicionado.';
-  ui.metricTotal.textContent=String(paradas.length).padStart(2,'0');
-  ui.metricPendentes.textContent=String(pendentes).padStart(2,'0');
-  ui.metricConcluidas.textContent=String(feitas).padStart(2,'0');
-  ui.metricProgress.textContent=`${percentual}%`;
-  ui.progressBar.style.width=`${percentual}%`;
-  ui.progressTrack.setAttribute('aria-valuenow',String(percentual));
-  ui.heroPendentes.textContent=String(pendentes);
-  ui.heroDistancia.textContent=pronta&&planejamento.km!=null?`${planejamento.km.toFixed(1).replace('.',',')} km`:'—';
-  ui.heroTempo.textContent=pronta&&planejamento.min!=null
-    ? planejamento.min>=60?`${Math.floor(planejamento.min/60)}h ${Math.round(planejamento.min%60)}min`:`${Math.round(planejamento.min)} min`
-    :'—';
-  ui.btnComecar.disabled=!pronta||!pendentes||otimizacaoEmCurso;
-  ui.btnOtimizar.disabled=!pendentes||otimizacaoEmCurso;
 
-  if(!paradas.length){
-    ui.heroStatus.textContent='Pronto para planejar';
-    ui.routeState.textContent='Em preparação';
-    statusPlano('Adicione os endereços. O cálculo começa só quando você clicar em “Otimizar rota”.');
-    ui.statusMapa.textContent='Adicione endereços para começar.';
-    ui.mapHint.textContent='Os pinos aparecem quando você adiciona endereços.';
-  } else if (!pronta) {
-    ui.heroStatus.textContent='Aguardando otimização';
-    ui.routeState.textContent='Falta otimizar';
-    statusPlano(`${pendentes} ${pendentes===1?'destino cadastrado':'destinos cadastrados'}. Quando terminar, clique em “Otimizar rota”.`,'alerta');
-    ui.statusMapa.textContent='Pontos cadastrados. O trajeto ainda não foi calculado.';
-    ui.mapHint.textContent='Otimize para desenhar o percurso pelas ruas.';
-  } else if(rotaIniciada) {
-    ui.heroStatus.textContent=pendentes?'Rota em andamento':'Entregas concluídas';
-    ui.routeState.textContent=pendentes?'Em andamento':'Concluída';
-    statusPlano(pendentes?`Rota otimizada. Faltam ${pendentes} entrega${pendentes!==1?'s':''}.`:'Todas as entregas foram concluídas.','ok');
-    ui.statusMapa.textContent=planejamento.linhaAproximada?'Sequência pronta. Desenho do trajeto é ilustrativo.':'Sequência otimizada · trajeto estimado.';
-    ui.mapHint.textContent='Toque em um pino para ver o endereço.';
-  } else {
-    ui.heroStatus.textContent='Rota otimizada';
-    ui.routeState.textContent='Pronta para sair';
-    statusPlano(planejamento.modo==='ruas'
-      ? 'Sequência organizada usando tempos estimados pelas ruas. Agora é só começar as entregas.'
-      : 'Sequência organizada por proximidade aproximada. Confira o percurso antes de sair.','ok');
-    ui.statusMapa.textContent=planejamento.linhaAproximada?'Ordem pronta. Linha no mapa ilustrativa.':'Percurso estimado desenhado no mapa.';
-    ui.mapHint.textContent='Toque em um pino para ver o endereço.';
-  }
-
-  ui.lista.replaceChildren();
-  if(!paradas.length){
-    const div=document.createElement('div');div.className='empty-state';
-    div.innerHTML='<i class="fa-solid fa-map-location-dot"></i><strong>Nenhuma entrega por aqui</strong><span>Digite seu primeiro endereço no campo acima.</span>';
-    ui.lista.append(div);
-  }
-  const proxima=rotaIniciada?paradas.find(p=>!p.concluida):null;
-  paradas.forEach((p,i)=>{
-    const card=document.createElement('article');
-    card.className=`stop-card${p.concluida?' done':''}${p.id===proxima?.id?' current':''}`;
-    const header=document.createElement('div');header.className='stop-header';
-    const numero=document.createElement('span');numero.className='stop-number';numero.textContent=String(i+1).padStart(2,'0');
-    const texto=document.createElement('div');texto.className='stop-details';
-    const nome=document.createElement('strong');nome.textContent=p.endereco;
-    const detalhe=document.createElement('small');
-    const avisoPrecisao=p.precisao==='entrada'?'Entrada identificada':p.precisao==='confirmado'?'Número identificado':'Localização aproximada na rua';
-    const eta=pronta&&planejamento?.etaPorId?.[p.id]!=null?` · +${planejamento.etaPorId[p.id]} min`:'';
-    detalhe.textContent=(p.concluida?'Entrega concluída':avisoPrecisao)+eta+(p.urgente?' · PRIORITÁRIA':'');
-    if(p.notas){const nota=document.createElement('small');nota.className='stop-note';nota.textContent=`📦 ${p.notas}`;texto.append(nome,detalhe,nota);} 
-    if(!p.notas)texto.append(nome,detalhe);
-    header.append(numero,texto);
-    const acoes=document.createElement('div');acoes.className='stop-actions';
-    const nav=document.createElement('a');nav.className='stop-action';nav.href=urlNavegacao(p);
-    nav.target='_blank';nav.rel='noopener noreferrer';nav.innerHTML='<i class="fa-solid fa-location-arrow"></i> Navegar';
-    const waze=document.createElement('a');waze.className='stop-action waze';
-    waze.href=`https://waze.com/ul?ll=${p.lat}%2C${p.lon}&navigate=yes`;
-    waze.rel='noopener noreferrer';waze.target='_blank';
-    waze.innerHTML='<i class="fa-solid fa-car"></i> Waze';
-    const editar=document.createElement('button');editar.type='button';editar.className='stop-action';
-    editar.innerHTML='<i class="fa-solid fa-pen"></i> Editar';
-    editar.addEventListener('click',()=>{
-      textoOriginalBusca=p.endereco;
-      prepararRevisao(null,p);
-      $('nova-entrega').scrollIntoView({behavior:'smooth',block:'start'});
-    });
-    const entregue=document.createElement('button');entregue.type='button';
-    entregue.className='stop-action primary';
-    entregue.innerHTML=p.concluida?'<i class="fa-solid fa-rotate-left"></i> Desfazer':'<i class="fa-solid fa-check"></i> Entregue';
-    entregue.addEventListener('click',()=>alternarConcluida(p.id));
-    const remover=document.createElement('button');remover.type='button';remover.className='stop-action delete';
-    remover.setAttribute('aria-label',`Excluir parada ${i+1}`);remover.title='Excluir parada';
-    remover.innerHTML='<i class="fa-solid fa-trash"></i>';
-    remover.addEventListener('click',()=>{
-      paradas=paradas.filter(item=>item.id!==p.id);invalidarPlano();renderizar();aviso('Parada excluída.');
-    });
-    acoes.append(nav,waze,editar,entregue,remover);card.append(header,acoes);ui.lista.append(card);
+  ui.cancelEdit.addEventListener('click', () => {
+    editingId = null; selected = null; ui.input.value = '';
+    ui.add.textContent = '＋ Adicionar entrega';
+    ui.cancelEdit.classList.add('hidden');
+    searchSeq++; searchController?.abort(); clearTimeout(searchTimer); hideSuggestions();
+    textStatus('Digite o nome da rua e o número para começar.');
   });
-  if(rotaIniciada&&proxima){
-    ui.painel.classList.remove('hidden');
-    ui.numeroProxima.textContent=String(paradas.findIndex(p=>p.id===proxima.id)+1).padStart(2,'0');
-    ui.enderecoProxima.textContent=proxima.endereco;
-    ui.progresso.textContent=`${feitas} de ${paradas.length} concluídas`;
-    ui.btnNavegar.href=urlNavegacao(proxima);
-    ui.btnConcluir.onclick=()=>alternarConcluida(proxima.id);
-    ui.avisoChegada.classList.toggle('hidden',!destinosAvisados.has(proxima.id));
-    ui.avisoChegada.textContent=destinosAvisados.has(proxima.id)
-      ?(proxima.precisao==='aproximado'?'Você está perto do ponto estimado.':'Destino alcançado: você está a até 10 m do ponto de acesso.') : ''; 
-  } else {ui.painel.classList.add('hidden');ui.avisoChegada.classList.add('hidden');}
-  salvar();desenharMarcadores();atualizarLinha();
-}
-function alternarConcluida(id) {
-  destinosAvisados.delete(id);
-  paradas=paradas.map(p=>p.id===id?{...p,concluida:!p.concluida}:p);
-  renderizar();
-}
-ui.btnComecar.addEventListener('click',()=>{
-  if(!rotaOtimizada()){statusPlano('Primeiro, clique em “Otimizar rota”.','alerta');return;}
-  if(!paradas.some(p=>!p.concluida))return;
-  rotaIniciada=true;renderizar();
-  $('mapa').scrollIntoView({behavior:'smooth',block:'start'});
-});
-ui.btnResetar.addEventListener('click',()=>{
-  if(!confirm('Apagar todas as entregas desta rota? Essa ação não pode ser desfeita.'))return;
-  paradas=[];invalidarPlano();renderizar();aviso('Pronto! Você pode cadastrar uma nova rota.');
-});
-ui.btnLimpar.addEventListener('click',()=>{
-  if(!paradas.some(p=>p.concluida)){aviso('Nenhuma entrega concluída para remover.');return;}
-  paradas=paradas.filter(p=>!p.concluida);invalidarPlano();renderizar();aviso('Entregas concluídas removidas.');
-});
 
-// ---------- OTIMIZAÇÃO: SÓ AO TOCAR NO BOTÃO ----------
-function matrizGeografica(pontos) {
-  return pontos.map(a=>pontos.map(b=>distanciaMetros(a,b)/11.1)); // segundos aproximados; apenas para ordenar
-}
-function custoSequencia(indices,matriz) {
-  let soma=0, anterior=0;
-  for(const atual of indices){
-    const valor=matriz[anterior]?.[atual];
-    if(!Number.isFinite(valor))return Infinity;
-    soma+=valor;anterior=atual;
-  }
-  return soma;
-}
-function heuristicaCom2Opt(matriz,pontos) {
-  // Caminho aberto: começa na origem (índice 0), não precisa retornar ao depósito.
-  const restantes=Array.from({length:matriz.length-1},(_,i)=>i+1), ordem=[];
-  let atual=0;
-  while(restantes.length){
-    let pos=0,menor=Infinity;
-    const comPrioridade=restantes.some(i=>Boolean(pontos[i]?.urgente));
-    restantes.forEach((i,k)=>{
-      if(comPrioridade&&!pontos[i]?.urgente)return;
-      const d=matriz[atual][i];if(Number.isFinite(d)&&d<menor){menor=d;pos=k;}
-    });
-    const [escolhido]=restantes.splice(pos,1);ordem.push(escolhido);atual=escolhido;
-  }
-  let melhor=custoSequencia(ordem,matriz);
-  // Testa reversões de trechos e só mantém melhorias. Considera ruas de mão única:
-  // calcula o custo de toda a sequência, não usa a fórmula simétrica.
-  for(let rodada=0;rodada<12;rodada++){
-    let ganho=false;
-    for(let i=0;i<ordem.length-1;i++)for(let j=i+1;j<ordem.length;j++){
-      const candidata=[...ordem.slice(0,i),...ordem.slice(i,j+1).reverse(),...ordem.slice(j+1)];
-      // Priorizadas permanecem antes das demais, mesmo após inversão.
-      let viuNormal=false,prioridadeAtrasada=false;
-      for(const idx of candidata){if(!pontos[idx]?.urgente)viuNormal=true;else if(viuNormal){prioridadeAtrasada=true;break;}}
-      if(prioridadeAtrasada)continue;
-      const custo=custoSequencia(candidata,matriz);
-      if(custo+0.1<melhor){ordem.splice(0,ordem.length,...candidata);melhor=custo;ganho=true;}
-    }
-    if(!ganho)break;
-  }
-  return ordem;
-}
-async function buscarMatriz(pontos) {
-  const coords=pontos.map(p=>`${p.lon},${p.lat}`).join(';');
-  const url=`${CONFIG.osrm}/table/v1/driving/${coords}?annotations=duration`;
-  const resposta=await fetchComTimeout(url,{timeout:CONFIG.limiteTempoRotaMs});
-  if(!resposta.ok)throw new Error('Não foi possível consultar as ruas.');
-  const data=await resposta.json();
-  if(data.code!=='Ok'||!Array.isArray(data.durations)||data.durations.length!==pontos.length)
-    throw new Error('Tempos de percurso indisponíveis.');
-  // Paradas desconectadas da malha viária exigem fallback claramente indicado.
-  if(data.durations.some(l=>!Array.isArray(l)||l.some(v=>!Number.isFinite(v))))
-    throw new Error('Existem pontos sem ligação conhecida pelas ruas.');
-  return data.durations;
-}
-async function buscarTrajeto(pontos) {
-  const coords=pontos.map(p=>`${p.lon},${p.lat}`).join(';');
-  const url=`${CONFIG.osrm}/route/v1/driving/${coords}?overview=full&geometries=geojson&steps=false`;
-  const resposta=await fetchComTimeout(url,{timeout:CONFIG.limiteTempoRotaMs});
-  if(!resposta.ok)throw new Error('Trajeto indisponível');
-  const data=await resposta.json();
-  if(data.code!=='Ok'||!data.routes?.[0]?.geometry?.coordinates?.length) throw new Error('Trajeto não encontrado');
-  return data.routes[0];
-}
-ui.btnOtimizar.addEventListener('click',async()=>{
-  const pendentes=paradas.filter(p=>!p.concluida);
-  if(otimizacaoEmCurso)return;
-  if(!pendentes.length){statusPlano('Adicione ao menos uma entrega antes de otimizar.','alerta');return;}
-  if(pendentes.length+1>CONFIG.maxPontosRoteamento){
-    statusPlano(`Para evitar erros, otimize em grupos de até ${CONFIG.maxPontosRoteamento-1} entregas.`,'alerta');return;
-  }
-  const assinatura=assinaturaCalculo();
-  otimizacaoEmCurso=true;
-  const pontos=[origem,...pendentes];
-  busy(ui.btnOtimizar,true,'Calculando...');
-  ui.mapaLoading.classList.remove('hidden');
-  statusPlano('Encontrando a melhor sequência disponível para seus endereços...');
-  let matriz,modo='ruas',indices;
-  try {
-    try { matriz=await buscarMatriz(pontos); }
-    catch(e) {console.warn('Matriz rodoviária:',e);matriz=matrizGeografica(pontos);modo='aproximado';}
-    indices=heuristicaCom2Opt(matriz,pontos);
-    if(assinaturaCalculo()!==assinatura)throw new Error('A lista foi alterada. Clique em otimizar novamente.');
-    const novasPendentes=indices.map(i=>pendentes[i-1]);
-    const pontosOrdenados=[origem,...novasPendentes];
-    let trajetoCalculado=null;
-    let geometria=pontosOrdenados.map(p=>[p.lon,p.lat]);
-    let km=null,min=null,linhaAproximada=true;
+  // ---- Map. Map errors must never stop address entry. ----
+  function initMap() {
+    if (!window.maplibregl) { ui.mapPlaceholder.classList.remove('hidden'); ui.mapStatus.textContent = 'Mapa temporariamente indisponível.'; return; }
     try {
-      const rota=await buscarTrajeto(pontosOrdenados);trajetoCalculado=rota;
-      geometria=rota.geometry.coordinates;
-      km=rota.distance/1000;min=rota.duration/60;linhaAproximada=false;
-    } catch(e) {console.warn('Traçado pelas ruas:',e);}
-    if(assinaturaCalculo()!==assinatura)throw new Error('A lista mudou durante o cálculo. Otimize novamente.');
-    let i=0;paradas=paradas.map(p=>p.concluida?p:novasPendentes[i++]);
-    // Estimativa acumulada por parada, incluindo tempo opcional de atendimento.
-    const etaPorId={};let acumulado=0,anteriorIndice=0;
-    novasPendentes.forEach((parada,i)=>{
-      const indiceOriginal=indices[i];
-      const duracao=trajetoCalculado?.legs?.[i]?.duration;
-      acumulado+=(Number.isFinite(duracao)?duracao:matriz[anteriorIndice]?.[indiceOriginal]||0)/60;
-      etaPorId[parada.id]=Math.round(acumulado);
-      acumulado+=parada.tempoParada||0;
-      anteriorIndice=indiceOriginal;
+      map = new maplibregl.Map({ container: ui.map, style: CFG.mapStyle, center: [origin.lon, origin.lat], zoom: 12.8, attributionControl: true });
+      map.addControl(new maplibregl.NavigationControl({ showCompass:false }), 'bottom-right');
+      map.on('load', () => {
+        mapReady = true;
+        map.addSource('route-line', { type:'geojson', data: {type:'FeatureCollection', features:[]} });
+        map.addLayer({ id:'route-stroke', source:'route-line', type:'line', layout:{'line-cap':'round','line-join':'round'}, paint:{'line-color':'#278e69','line-width':5,'line-opacity':.9} });
+        drawMap();
+      });
+      map.on('error', event => {
+        console.warn('Mapa:', event.error);
+        if (!mapReady) {
+          ui.mapStatus.textContent = 'Mapa indisponível no momento. O cadastro continua funcionando.';
+          ui.mapPlaceholder.classList.remove('hidden');
+        }
+      });
+    } catch (error) { console.warn('Mapa indisponível:', error); ui.mapPlaceholder.classList.remove('hidden'); }
+  }
+  function createMarker(label, type, lng, lat, popupText) {
+    const element = document.createElement('div');
+    element.className = `map-pin ${type}`;
+    element.textContent = label;
+    const popup = document.createElement('div');
+    const title = document.createElement('strong'); title.textContent = popupText;
+    popup.appendChild(title);
+    const marker = new maplibregl.Marker({ element }).setLngLat([lng,lat]).setPopup(new maplibregl.Popup({offset:17}).setDOMContent(popup)).addTo(map);
+    markers.push(marker);
+  }
+  function fitMap() {
+    if (!mapReady) return;
+    const points = [[origin.lon,origin.lat],...stops.map(p=>[p.lon,p.lat])];
+    if (!points.length) return;
+    if (points.length === 1) { map.easeTo({center:points[0], zoom:14}); return; }
+    const bounds = new maplibregl.LngLatBounds(points[0], points[0]);
+    points.slice(1).forEach(p=>bounds.extend(p));
+    map.fitBounds(bounds, {padding:45,maxZoom:15,duration:450});
+  }
+  function drawMap() {
+    if (!mapReady) return;
+    markers.forEach(m=>m.remove()); markers=[];
+    createMarker('⌂','origin',origin.lon,origin.lat,`Origem: ${origin.endereco}`);
+    const next = started ? stops.find(p=>!p.concluida) : null;
+    stops.forEach((p,i)=>createMarker(String(i+1),p.concluida ? 'done' : next?.id === p.id ? 'next' : '',p.lon,p.lat,p.endereco));
+    const line = routeValid() ? planned.geometry : null;
+    const feature = line && line.length > 1 ? { type:'Feature',properties:{},geometry:{type:'LineString',coordinates:line} } : null;
+    map.getSource('route-line')?.setData({type:'FeatureCollection',features:feature?[feature]:[]});
+    map.setPaintProperty('route-stroke','line-dasharray',planned?.approximate?[1.4,1.4]:[1,0]);
+    if (gpsFix) displayGps();
+  }
+  ui.fit.addEventListener('click', fitMap);
+
+  // ---- GPS position. Geofence arrival is informational; delivery is never marked automatically. ----
+  function displayGps() {
+    if (!gpsFix || !mapReady) return;
+    if (!gpsMarker) {
+      const node = document.createElement('div'); node.className = 'gps-marker';
+      gpsMarker = new maplibregl.Marker({element:node}).setLngLat([gpsFix.lon,gpsFix.lat]).addTo(map);
+    } else gpsMarker.setLngLat([gpsFix.lon,gpsFix.lat]);
+    ui.gpsMessage.textContent = `◎ GPS ativo · precisão aproximada ±${Math.round(gpsFix.accuracy)} m`;
+    const target = stops.find(p=>!p.concluida);
+    if (started && target && target.precision === 'exata' && gpsFix.accuracy <= 10 && meters(gpsFix,target) <= 10) {
+      if (activeArrivalId !== target.id) {
+        activeArrivalId = target.id;
+        ui.arrived.textContent = 'Você chegou perto do destino. Confirme a entrega ao finalizar.';
+        ui.arrived.classList.remove('hidden');
+        showToast('Destino próximo: confira o local de entrega.');
+      }
+    }
+  }
+  function stopGPS() {
+    if (gpsWatchId !== null) navigator.geolocation.clearWatch(gpsWatchId);
+    gpsWatchId = null; clearInterval(gpsVisualTimer); gpsVisualTimer = null;
+    gpsMarker?.remove(); gpsMarker = null; gpsFix = null;
+    ui.gps.textContent = '◎ GPS ao vivo'; ui.gps.setAttribute('aria-pressed','false'); ui.gps.classList.remove('active');
+    ui.gpsMessage.textContent = '● Origem    ● Entregas    ● GPS';
+  }
+  ui.gps.addEventListener('click', () => {
+    if (gpsWatchId !== null) { stopGPS(); return; }
+    if (!navigator.geolocation) { showToast('GPS não disponível neste navegador.'); return; }
+    if (!window.isSecureContext) { showToast('Para usar GPS, abra por HTTPS ou localhost.'); return; }
+    ui.gps.textContent = '◎ Ligando GPS...';
+    gpsWatchId = navigator.geolocation.watchPosition(position => {
+      gpsFix = {lat:position.coords.latitude,lon:position.coords.longitude,accuracy:position.coords.accuracy};
+      displayGps();
+    }, error => {
+      showToast(error.code===1?'Autorize a localização no navegador.':'Não conseguimos obter seu GPS.');
+      stopGPS();
+    }, {enableHighAccuracy:true,maximumAge:5000,timeout:17000});
+    ui.gps.textContent='● GPS ligado'; ui.gps.classList.add('active'); ui.gps.setAttribute('aria-pressed','true');
+    gpsVisualTimer = setInterval(displayGps, 5000);
+  });
+  window.addEventListener('pagehide', stopGPS);
+
+  // ---- Origin ----
+  ui.originInput.value = origin.personalizado ? origin.endereco : '';
+  ui.originLabel.textContent = origin.personalizado ? origin.endereco : 'São José dos Campos, SP';
+  ui.originBtn.addEventListener('click', async () => {
+    const typed = ui.originInput.value.trim();
+    if (!typed) { ui.originStatus.textContent='Digite uma origem para continuar.'; return; }
+    setBusy(ui.originBtn,true,'Buscando...');
+    try {
+      const query = parseAddress(typed), a = area();
+      const hits = await getPhotonCandidates(query,a);
+      const selectedOrigin = hits.sort((x,y)=>score(y,query,a)-score(x,query,a))[0];
+      if (!selectedOrigin) throw new Error('Não foi possível localizar esta origem.');
+      origin = { endereco:typed,lat:selectedOrigin.lat,lon:selectedOrigin.lon,personalizado:true };
+      ui.originLabel.textContent = typed;
+      ui.originStatus.textContent = 'Ponto de partida atualizado.';
+      invalidate(); drawAll(); save(); fitMap();
+    } catch (error) { ui.originStatus.textContent = error.message || 'Não foi possível localizar a origem.'; }
+    finally { setBusy(ui.originBtn,false,''); }
+  });
+  ui.originGPS.addEventListener('click', () => {
+    if (!navigator.geolocation || !window.isSecureContext) { ui.originStatus.textContent='GPS requer HTTPS ou localhost.';return; }
+    navigator.geolocation.getCurrentPosition(position => {
+      origin={ endereco:'Minha localização atual',lat:position.coords.latitude,lon:position.coords.longitude,personalizado:true };
+      ui.originInput.value=origin.endereco;ui.originLabel.textContent='Localização atual';
+      ui.originStatus.textContent='Origem definida pelo GPS.';invalidate();drawAll();save();fitMap();
+    },()=>{ui.originStatus.textContent='GPS indisponível. Verifique a permissão.';},{enableHighAccuracy:true,timeout:15000});
+  });
+
+  // ---- Route optimizer: road durations → nearest-neighbor + 2-opt; geographic fallback. ----
+  function greedy(points, matrix) {
+    const remaining = points.map((_,i)=>i+1);const result=[];let current=0;
+    while (remaining.length) {
+      let pick=0, best=Infinity;
+      remaining.forEach((id,i)=>{ const value=matrix[current]?.[id];if(Number.isFinite(value)&&value<best){best=value;pick=i;} });
+      current=remaining.splice(pick,1)[0];result.push(current);
+    }
+    return result;
+  }
+  function routeCost(indices, matrix) {
+    let total=0, prev=0;
+    for (const idx of indices) { const val=matrix[prev]?.[idx];total+=Number.isFinite(val)?val:1e10;prev=idx; }
+    return total;
+  }
+  function refine2Opt(initial, matrix) {
+    let best=[...initial];let bestCost=routeCost(best,matrix), improved=true, passes=0;
+    while(improved && passes++<6){improved=false;
+      for(let i=0;i<best.length-1;i++) for(let j=i+1;j<best.length;j++) {
+        const test=[...best.slice(0,i),...best.slice(i,j+1).reverse(),...best.slice(j+1)];
+        const cost=routeCost(test,matrix);
+        if(cost+0.000001<bestCost){best=test;bestCost=cost;improved=true;}
+      }
+    }
+    return best;
+  }
+  function distanceMatrix(points) {
+    return points.map(a=>points.map(b=>meters(a,b)));
+  }
+  async function getRoadMatrix(points) {
+    const coords=points.map(p=>`${p.lon},${p.lat}`).join(';');
+    const url=`${CFG.osrm}/table/v1/driving/${coords}?annotations=duration`;
+    const data=await getJSONRemote(url,{timeout:16000});
+    if(data.code!=='Ok'||!Array.isArray(data.durations))throw new Error('Matriz de ruas indisponível');
+    return data.durations;
+  }
+  async function getRoadPolyline(points) {
+    const coords=points.map(p=>`${p.lon},${p.lat}`).join(';');
+    const url=`${CFG.osrm}/route/v1/driving/${coords}?overview=full&geometries=geojson&steps=false`;
+    const data=await getJSONRemote(url,{timeout:18000});
+    if(data.code!=='Ok'||!data.routes?.[0]?.geometry?.coordinates)throw new Error('Percurso indisponível');
+    return data.routes[0];
+  }
+  function orderPending(ids) {
+    const order=new Map(ids.map((p,i)=>[p.id,i]));
+    const complete=stops.filter(p=>p.concluida);
+    const pending=stops.filter(p=>!p.concluida).sort((a,b)=>order.get(a.id)-order.get(b.id));
+    stops=[...complete,...pending];
+  }
+  ui.optimize.addEventListener('click', async () => {
+    if(optimizing) return;
+    const pending=stops.filter(p=>!p.concluida);
+    if(!pending.length){showToast('Adicione pelo menos uma entrega pendente.');return;}
+    const snapshot=routeRevision;
+    optimizing=true;setBusy(ui.optimize,true,'Otimizando...');ui.start.disabled=true;
+    ui.heroNotice.textContent='Calculando a sequência das entregas...';
+    try{
+      const points=[origin,...pending];
+      let matrix, matrixApproximate=false;
+      try { matrix=points.length-1<=CFG.maxStopsForRoadMatrix ? await getRoadMatrix(points) : distanceMatrix(points);matrixApproximate=points.length-1>CFG.maxStopsForRoadMatrix; }
+      catch (error){console.warn('Distâncias por ruas indisponíveis:',error);matrix=distanceMatrix(points);matrixApproximate=true;}
+      if(snapshot!==routeRevision) return;
+      const best=refine2Opt(greedy(pending,matrix),matrix);
+      const ordered=best.map(i=>pending[i-1]);
+      let route=null;
+      if(ordered.length<=CFG.maxStopsForRoadMatrix) {
+        try{route=await getRoadPolyline([origin,...ordered]);}catch(error){console.warn('Traçado por ruas indisponível:',error);}
+      }
+      if(snapshot!==routeRevision) return;
+      orderPending(ordered);
+      const pointsOrdered=[origin,...ordered];
+      const approxKm=pointsOrdered.slice(1).reduce((sum,p,i)=>sum+meters(pointsOrdered[i],p),0)*1.25/1000;
+      const km=route ? route.distance/1000 : approxKm;
+      const mins=route ? Math.ceil(route.duration/60) : Math.ceil(approxKm/28*60);
+      const geometry=route ? route.geometry.coordinates : pointsOrdered.map(p=>[p.lon,p.lat]);
+      planned={signature:signature(),order:ordered.map(p=>p.id),km,mins,geometry,
+        approximate:matrixApproximate||!route, roadLine:Boolean(route)};
+      started=false;save();drawAll();fitMap();
+      showToast(route?'Rota calculada. Agora você pode começar as entregas.':'Ordem calculada, mas o percurso está aproximado.');
+    } catch(error) { ui.heroNotice.textContent='Não foi possível otimizar agora. Tente novamente.';showToast(error.message||'Erro ao otimizar.'); }
+    finally{optimizing=false;setBusy(ui.optimize,false,'');drawAll();}
+  });
+  ui.start.addEventListener('click',()=>{
+    if(!routeValid()){showToast('Otimize a rota antes de começar.');return;}
+    started=true;activeArrivalId=null;save();drawAll();showToast('Rota iniciada. Boa entrega!');
+  });
+
+  // ---- Delivery list and progress ----
+  function el(tag, className, text) { const node=document.createElement(tag);if(className)node.className=className;if(text!==undefined)node.textContent=text;return node; }
+  function buildButton(label, action, className='', title='') {
+    const b=el('button',className,label);b.type='button';if(title)b.title=title;b.addEventListener('click',action);return b;
+  }
+  function renderStops() {
+    ui.list.replaceChildren();
+    if(!stops.length)ui.list.append(el('div','empty','Nenhuma entrega cadastrada. Digite uma rua acima para começar.'));
+    const next=started?stops.find(p=>!p.concluida):null;
+    stops.forEach((stop,index)=>{
+      const card=el('article',`stop${stop.concluida?' completed':''}${next?.id===stop.id?' primary':''}`);
+      const num=el('span','stop-index',String(index+1));
+      const info=el('div','stop-info');
+      info.append(el('strong',stop.concluida?'done':'',stop.endereco));
+      info.append(el('small','',`${stop.concluida?'Concluída':'Pendente'} · ${stop.precision==='exata'?'Localização do imóvel identificada':'Localização aproximada'}`));
+      const actions=el('div','stop-actions');
+      const link=el('a','', '↗ Navegar');link.href=locationURL(stop);link.target='_blank';link.rel='noopener noreferrer';
+      const mark=buildButton(stop.concluida?'↶ Desfazer':'✓ Entregue',()=>{
+        const hadPlan = routeValid();
+        stop.concluida=!stop.concluida;
+        if(!started || !hadPlan) invalidate();
+        else { planned.signature=signature(); activeArrivalId=null; }
+        save();drawAll();
+      },'done-btn');
+      const edit=buildButton('✎ Editar',()=>{
+        editingId=stop.id;selected=null;ui.input.value=stop.endereco;ui.add.textContent='✓ Salvar edição';ui.cancelEdit.classList.remove('hidden');
+        ui.input.focus();ui.input.scrollIntoView({behavior:'smooth',block:'center'});
+        textStatus('Edite o endereço, escolha a sugestão correta e clique em Salvar edição.');
+        inputChange();
+      });
+      const remove=buildButton('✕',()=>{
+        if(!confirm(`Remover a entrega: ${stop.endereco}?`))return;
+        stops=stops.filter(x=>x.id!==stop.id);if(editingId===stop.id)editingId=null;
+        invalidate();save();drawAll();
+      },'remove','Excluir entrega');
+      actions.append(link,mark,edit,remove);
+      card.append(num,info,actions);ui.list.appendChild(card);
     });
-    if(Number.isFinite(min))min+=novasPendentes.reduce((s,p)=>s+(p.tempoParada||0),0);
-    planejamento={chave:chaveDaRota(),coordenadas:geometria,km,min,linhaAproximada,modo,etaPorId};
-    renderizar();
-    if(modo==='aproximado'||linhaAproximada)
-      statusPlano('Sequência calculada. Parte do percurso é aproximada; confira o mapa antes de sair.','alerta');
-    else statusPlano('Pronto! Ordem otimizada por ruas. Você já pode começar as entregas.','ok');
-    enquadrar();
-  } catch(e) {
-    console.warn('Otimização falhou:',e);
-    statusPlano(e.message||'Não foi possível otimizar a rota agora.','alerta');
-  } finally {
-    otimizacaoEmCurso=false;
-    busy(ui.btnOtimizar,false);
-    ui.mapaLoading.classList.add('hidden');
-    ui.btnOtimizar.disabled=!paradas.some(p=>!p.concluida);
-    ui.btnComecar.disabled=!rotaOtimizada()||!paradas.some(p=>!p.concluida);
   }
-});
-
-// ---------- PONTO DE PARTIDA ----------
-async function salvarOrigemDigitada() {
-  const texto=ui.inputOrigem.value.trim();
-  if(ui.btnSalvarOrigem.disabled) return;
-  if(!texto){aviso('Digite seu endereço de partida ou use o GPS.',true);return;}
-  busy(ui.btnSalvarOrigem,true,'Localizando...');
-  try {
-    const leitura=interpretarEndereco(texto);
-    const p=await geocodificarRevisado(leitura);
-    if(ui.inputOrigem.value.trim()!==texto) { aviso('Origem alterada. Confirme novamente o endereço.'); return; }
-    if(!p)throw new Error('Não encontramos o ponto de partida. Confira rua e cidade ou use o GPS.');
-    if(leitura.numero&&!p.exato&&!confirm('O número do ponto de partida não foi confirmado. Usar localização aproximada?'))return;
-    origem={endereco:texto,lat:p.lat,lon:p.lon,personalizado:true};
-    ui.labelOrigem.textContent='Origem definida';
-    cacheBusca.clear();invalidarPlano();renderizar();enquadrar();
-    aviso('Ponto de partida atualizado.');
-  } catch(e){aviso(e.message||'Não foi possível localizar o ponto de partida.',true);}
-  finally{busy(ui.btnSalvarOrigem,false);}
-}
-ui.btnSalvarOrigem.addEventListener('click',salvarOrigemDigitada);
-ui.inputOrigem.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();salvarOrigemDigitada();}});
-ui.btnGpsOrigem.addEventListener('click',()=>{
-  if(!navigator.geolocation){aviso('O GPS não está disponível neste navegador.',true);return;}
-  if(!window.isSecureContext){aviso('Para usar o GPS, abra o site por HTTPS ou localhost.',true);return;}
-  busy(ui.btnGpsOrigem,true,'Localizando...');
-  navigator.geolocation.getCurrentPosition(pos=>{
-    origem={endereco:'Minha localização',lat:pos.coords.latitude,lon:pos.coords.longitude,personalizado:true};
-    ui.inputOrigem.value=origem.endereco;ui.labelOrigem.textContent='Origem pelo GPS';
-    cacheBusca.clear();invalidarPlano();renderizar();enquadrar();
-    busy(ui.btnGpsOrigem,false);
-    aviso(`Origem definida pelo GPS (precisão informada: ±${Math.round(pos.coords.accuracy)} m).`);
-  },e=>{busy(ui.btnGpsOrigem,false);aviso(mensagemGPS(e),true);},
-  {enableHighAccuracy:true,timeout:15000,maximumAge:5000});
-});
-
-// ---------- GPS AO VIVO (sem novas consultas de rota) ----------
-function mensagemGPS(e) {return ({1:'Permissão de localização negada. Ative-a no navegador.',
-  2:'Não foi possível determinar sua posição.',3:'GPS demorou demais. Tente novamente.'})[e?.code]||'GPS indisponível.';}
-function areaGps(lat,lon,raio) {
-  const r=Math.max(1,Math.min(3000,raio||10)),pts=[];
-  for(let i=0;i<=48;i++){
-    const a=i/48*Math.PI*2;
-    pts.push([lon+r*Math.cos(a)/(111320*Math.max(.001,Math.cos(lat*Math.PI/180))),lat+r*Math.sin(a)/111320]);
+  function drawStats() {
+    const total=stops.length, done=stops.filter(p=>p.concluida).length,pending=total-done;
+    ui.heroCount.textContent=String(pending);
+    ui.heroKm.textContent=routeValid()?`${planned.km.toFixed(1).replace('.',',')} km`:'—';
+    ui.heroMin.textContent=routeValid()?`${planned.mins} min`:'—';
+    ui.heroNotice.textContent=routeValid()?(planned.approximate?'Rota pronta · estimativas aproximadas.':'Rota pronta para iniciar.') :total?'Você adicionou endereços. Clique em Otimizar rota quando terminar.':'Adicione suas entregas para começar.';
+    ui.optimize.disabled=optimizing||!pending;
+    ui.start.disabled=optimizing||!routeValid();
+    ui.count.textContent=`${total} ${total===1?'parada':'paradas'}`;
+    ui.subtitle.textContent=`${pending} ${pending===1?'pendente':'pendentes'} · ${done} ${done===1?'concluída':'concluídas'}`;
+    ui.total.textContent=String(total);ui.pending.textContent=String(pending);ui.done.textContent=String(done);
+    const percent=total?Math.round(done/total*100):0;
+    ui.percent.textContent=`${percent}%`;ui.progressBar.style.width=`${percent}%`;
+    ui.mapBadge.textContent=routeValid()?(started?'Rota em andamento':'Rota otimizada'):'Em preparação';
+    ui.mapStatus.textContent=routeValid()?(planned.roadLine?'Percurso traçado pelas ruas.':'Percurso aproximado.'): 'Os pontos aparecem enquanto você cadastra. A linha aparece após otimizar.';
+    const target=started?stops.find(p=>!p.concluida):null;
+    ui.next.classList.toggle('hidden',!target);
+    if(target){ui.nextNumber.textContent=String(stops.indexOf(target)+1);ui.nextAddress.textContent=target.endereco;
+      ui.nextNavigate.href=locationURL(target);ui.nextProgress.textContent=`${done} de ${total} concluídas`;
+      ui.nextDone.onclick=()=>{
+        const hadPlan = routeValid();
+        target.concluida=true; if(hadPlan) planned.signature=signature(); else invalidate();
+        activeArrivalId=null;ui.arrived.classList.add('hidden');save();drawAll();
+      };
+    }else ui.arrived.classList.add('hidden');
   }
-  return {type:'FeatureCollection',features:[{type:'Feature',properties:{},geometry:{type:'Polygon',coordinates:[pts]}}]};
-}
-function atualizarGPS(forcar=false) {
-  const p=ultimaPosicaoGPS;
-  if(!p||!mapPronto||gpsWatchId===null)return;
-  if(p.time!==instanteExibidoGPS||forcar){
-    instanteExibidoGPS=p.time;
-    if(!marcadorGPS){
-      const el=document.createElement('div');el.className='gps-ponto';
-      marcadorGPS=new maplibregl.Marker({element:el,anchor:'center'})
-        .setLngLat([p.lon,p.lat]).setPopup(new maplibregl.Popup({offset:16}).setText('Sua localização atual')).addTo(mapa);
-    } else marcadorGPS.setLngLat([p.lon,p.lat]);
-    mapa.getSource('gps-area')?.setData(areaGps(p.lat,p.lon,p.accuracy));
-    if(acompanharGPS)mapa.easeTo({center:[p.lon,p.lat],zoom:Math.max(15,mapa.getZoom()),duration:500});
-  }
-  const segundos=Math.round((Date.now()-p.time)/1000);
-  ui.gpsStatus.classList.remove('hidden');
-  ui.gpsStatus.textContent=segundos>20
-    ? `Último sinal do GPS há ${segundos}s · precisão ±${Math.round(p.accuracy)} m`
-    : `GPS ativo · precisão ±${Math.round(p.accuracy)} m`;
-}
-function verificarChegadaGPS(p) {
-  if(!rotaIniciada||!rotaOtimizada()||!p)return;
-  const destino=paradas.find(x=>!x.concluida);
-  if(!destino||destinosAvisados.has(destino.id))return;
-  // Leituras antigas ou imprecisas não devem provocar falso gatilho de 10m.
-  if(Date.now()-p.time>12000||!Number.isFinite(p.accuracy)||p.accuracy>CONFIG.gpsPrecisaoMaxima)return;
-  const d=distanciaMetros(p,destino);
-  const limite=destino.precisao==='aproximado'?30:CONFIG.raioChegadaMetros;
-  if(d>limite)return;
-  destinosAvisados.add(destino.id);
-  // Só termina o acompanhamento deste destino. Não temos controle sobre Waze/Google Maps.
-  renderizar();
-  ui.gpsStatus.textContent=destino.precisao==='aproximado'
-    ?'Você está perto do ponto estimado na rua. Confira o imóvel.'
-    :'Destino alcançado! Confirme a entrega quando concluir.';
-}
-function pararGPS() {
-  gpsVersao++;
-  if(gpsWatchId!==null && navigator.geolocation)navigator.geolocation.clearWatch(gpsWatchId);gpsWatchId=null;
-  if(gpsTimer!==null)clearInterval(gpsTimer);gpsTimer=null;
-  ultimaPosicaoGPS=null;instanteExibidoGPS=0;
-  if(marcadorGPS)marcadorGPS.remove();marcadorGPS=null;
-  if(mapPronto)mapa.getSource('gps-area')?.setData(linhaVazia());
-  ui.gpsStatus.classList.add('hidden');ui.btnCentralizarGps.classList.add('hidden');
-  ui.btnGpsLive.setAttribute('aria-pressed','false');
-  ui.btnGpsLive.innerHTML='<span class="gps-mini-dot"></span><span><i class="fa-solid fa-satellite-dish"></i> GPS ao vivo</span>';
-}
-function iniciarGPS() {
-  if(!navigator.geolocation){aviso('Seu dispositivo não tem suporte a GPS.',true);return;}
-  if(!window.isSecureContext){aviso('O GPS precisa de conexão HTTPS ou localhost.',true);return;}
-  const versao=++gpsVersao;
-  acompanharGPS=true;
-  ui.btnGpsLive.setAttribute('aria-pressed','true');
-  ui.btnGpsLive.innerHTML='<span class="gps-mini-dot"></span><span><i class="fa-solid fa-stop"></i> Parar GPS</span>';
-  ui.btnCentralizarGps.classList.remove('hidden');
-  ui.gpsStatus.classList.remove('hidden');ui.gpsStatus.textContent='Procurando sua localização...';
-  gpsWatchId=navigator.geolocation.watchPosition(pos=>{
-    if(versao!==gpsVersao)return;
-    ultimaPosicaoGPS={lat:pos.coords.latitude,lon:pos.coords.longitude,
-      accuracy:pos.coords.accuracy,time:pos.timestamp||Date.now()};
-    verificarChegadaGPS(ultimaPosicaoGPS);
-    if(!instanteExibidoGPS)atualizarGPS(true);
-  },e=>{
-    if(versao!==gpsVersao)return;
-    ui.gpsStatus.textContent=mensagemGPS(e);
-    if(e.code===1){pararGPS();aviso(mensagemGPS(e),true);}
-  },{enableHighAccuracy:true,maximumAge:0,timeout:15000});
-  gpsTimer=setInterval(()=>atualizarGPS(),CONFIG.intervaloGPS);
-}
-ui.btnGpsLive.addEventListener('click',()=>gpsWatchId===null?iniciarGPS():pararGPS());
-ui.btnCentralizarGps.addEventListener('click',()=>{acompanharGPS=true;if(ultimaPosicaoGPS)atualizarGPS(true);});
-window.addEventListener('pagehide',()=>{if(gpsWatchId!==null)pararGPS();});
+  function drawAll(){renderStops();drawStats();drawMap();}
+  ui.clean.addEventListener('click',()=>{
+    const count=stops.filter(p=>p.concluida).length;
+    if(!count){showToast('Nenhuma entrega concluída para remover.');return;}
+    stops=stops.filter(p=>!p.concluida);invalidate();save();drawAll();
+  });
+  ui.reset.addEventListener('click',()=>{
+    if(!stops.length)return;
+    if(!confirm('Apagar todas as entregas e iniciar uma rota nova?'))return;
+    stops=[];editingId=null;selected=null;ui.input.value='';invalidate();save();drawAll();showToast('Lista apagada.');
+  });
 
-// ---------- CÂMERA / LEITURA DE FOTO ----------
-ui.btnCamera.addEventListener('click',()=>ui.inputCamera.click());
-ui.inputCamera.addEventListener('change',async e=>{
-  const foto=e.target.files?.[0];if(!foto)return;
-  if(!foto.type.startsWith('image/')){aviso('Escolha uma foto válida.',true);return;}
-  busy(ui.btnCamera,true,'Lendo...');aviso('Reconhecendo o endereço da foto...');
-  try {
-    if(!window.Tesseract)throw new Error('Leitura de foto indisponível. Confira a conexão.');
-    const res=await window.Tesseract.recognize(foto,'por+eng');
-    const texto=(res.data.text||'').split(/\r?\n/).map(x=>x.trim()).filter(Boolean).join(', ');
-    if(!texto)throw new Error('A foto não contém texto legível.');
-    ui.endereco.value=texto;
-    ui.endereco.dispatchEvent(new Event('input'));
-    aviso('Texto preenchido. Confira a rua e o número antes de adicionar.');
-    ui.endereco.focus();
-  } catch(e){aviso(e.message||'Não foi possível ler a foto.',true);}
-  finally{busy(ui.btnCamera,false);ui.inputCamera.value='';}
-});
-
-// ---------- INÍCIO ----------
-ui.inputOrigem.value=origem.personalizado?origem.endereco:'';
-ui.labelOrigem.textContent=origem.personalizado?'Origem definida':'São José dos Campos';
-if(origem.personalizado)ui.ajudaOrigem.textContent='Seu ponto de partida foi salvo neste navegador.';
-renderizar();
-// Fallback apenas para a folha de estilos do mapa; não precisa de configuração do usuário.
-const mapaCss = document.getElementById('maplibre-css');
-if (mapaCss) mapaCss.addEventListener('error', () => {
-  if (!mapaCss.href.includes('jsdelivr.net'))
-    mapaCss.href = 'https://cdn.jsdelivr.net/npm/maplibre-gl@6.3.0/dist/maplibre-gl.css';
-});
-// Carrega o mapa sem bloquear a lista, os campos nem a otimização se a CDN estiver indisponível.
-iniciarMapa();
+  // ---- Initialize ----
+  drawStats();renderStops();initMap();
+})();
