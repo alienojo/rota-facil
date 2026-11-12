@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  // RotaFácil V15 — mapa com sequência, rota contínua e cadastro responsivo e cartões flutuantes sobre o mapa.
+  // RotaFácil V16 — mapa prioritário, pinos geográficos estáveis e ações flutuantes.
   // Photon oferece busca conforme digita; ViaCEP complementa rua, bairro e CEP.
   // Para escala comercial, hospede um serviço de geocodificação com SLA/proxy próprio.
   const CFG = Object.freeze({
@@ -44,7 +44,12 @@
     mapFloatActions: ID('map-float-actions'), mapHint: ID('map-hint'),
     mapRoutePhase: ID('map-route-phase'), mapRouteNote: ID('map-route-note'),
     mapRoutePending: ID('map-route-pending'), mapRouteKm: ID('map-route-km'), mapRouteTime: ID('map-route-time'),
-    mapSequence: ID('map-sequence-list'), mapSequenceStatus: ID('map-sequence-status'), mapSequenceHint: ID('map-sequence-hint')
+    mapSequence: ID('map-sequence-list'), mapSequenceStatus: ID('map-sequence-status'), mapSequenceHint: ID('map-sequence-hint'),
+    routeMap: ID('btn-route-map'), mapQuickInfo: ID('map-quick-info'),
+    mapRunner: ID('map-runner'), mapRunnerKicker: ID('map-runner-kicker'), mapRunnerAddress: ID('map-runner-address'),
+    mapRunnerDetail: ID('map-runner-detail'), mapRunnerNavigate: ID('map-runner-navigate'), mapRunnerMain: ID('map-runner-main'),
+    dock: ID('journey-dock'), dockKicker: ID('journey-dock-kicker'), dockTitle: ID('journey-dock-title'),
+    dockMap: ID('journey-dock-map'), dockAction: ID('journey-dock-action')
   };
   const missing = Object.entries(ui).flatMap(([key, element]) =>
     Array.isArray(element) ? element.some(item => !item) ? [key] : [] : !element ? [key] : []);
@@ -59,9 +64,20 @@
   }
   function cleanedStop(item) {
     if (!validPoint(item) || typeof item.endereco !== 'string') return null;
+    // V15 podia substituir o ponto original pelo encaixe na rua. Migrar essas
+    // entradas antigas sem perder a posição original nem o ponto de navegação.
+    const hasProperty = validPoint({lat:item.propertyLat,lon:item.propertyLon});
+    const hasNavigation = validPoint({lat:item.navLat,lon:item.navLon});
+    const legacySnap = (item.precision || item.precisao) === 'aproximada' &&
+      Boolean(item.locationChecked) && hasProperty && hasNavigation &&
+      Math.abs(Number(item.lat)-Number(item.navLat))<0.0000001 &&
+      Math.abs(Number(item.lon)-Number(item.navLon))<0.0000001 &&
+      (Math.abs(Number(item.lat)-Number(item.propertyLat))>0.0000001 ||
+       Math.abs(Number(item.lon)-Number(item.propertyLon))>0.0000001);
     return {
       id: String(item.id ?? `${Date.now()}-${Math.random()}`), endereco: item.endereco,
-      lat: Number(item.lat), lon: Number(item.lon), concluida: Boolean(item.concluida),
+      lat: legacySnap ? Number(item.propertyLat) : Number(item.lat),
+      lon: legacySnap ? Number(item.propertyLon) : Number(item.lon), concluida: Boolean(item.concluida),
       precision: item.precision || item.precisao || 'aproximada',
       city: String(item.city || item.campos?.cidade || ''), uf: String(item.uf || item.campos?.uf || 'SP'),
       number: String(item.number || item.campos?.numero || parseAddress(item.endereco).number || ''),
@@ -72,7 +88,7 @@
       propertyLon: validPoint({lat:item.propertyLat,lon:item.propertyLon}) ? Number(item.propertyLon) : Number(item.lon),
       navLat: validPoint({lat:item.navLat,lon:item.navLon}) ? Number(item.navLat) : Number(item.lat),
       navLon: validPoint({lat:item.navLat,lon:item.navLon}) ? Number(item.navLon) : Number(item.lon),
-      locationChecked: Boolean(item.locationChecked), accessConfirmed: Boolean(item.accessConfirmed), locationSource: String(item.locationSource || '')
+      locationChecked: Boolean(item.locationChecked), roadMatched: Boolean(item.roadMatched || legacySnap), accessConfirmed: Boolean(item.accessConfirmed), locationSource: String(item.locationSource || '')
     };
   }
   let stops = (Array.isArray(getJSON(STORE.stops, [])) ? getJSON(STORE.stops, []) : []).map(cleanedStop).filter(Boolean);
@@ -101,6 +117,7 @@
   let map = null, mapReady = false, gpsMarker = null, gpsAccuracyMarker = null, markers = [];
   let gpsWatchId = null, gpsVisualTimer = null, gpsFix = null, activeArrivalId = null;
   let activeTab = 'entregas', mapInitialized = false, focusedStopId = null, focusedGroupKey = null;
+  let mapSizeObserver = null;
   const roadSnapCache = new Map();
   const refineInProgress = new Set();
 
@@ -622,7 +639,7 @@
       city:c.city||area().city,uf:c.uf||area().uf,precision:coordinate.precision,
       road:c.road||parseAddress(addr).road,district:c.district||'',
       propertyLat:coordinate.lat,propertyLon:coordinate.lon,navLat:coordinate.lat,navLon:coordinate.lon,
-      locationChecked:false,accessConfirmed:false,locationSource:coordinate.source||''};
+      locationChecked:false,roadMatched:false,accessConfirmed:false,locationSource:coordinate.source||''};
   }
 
   ui.form.addEventListener('submit', async event => {
@@ -743,6 +760,7 @@
         }
       });
     }
+    updateJourneyUI();
     window.scrollTo({ top: 0, behavior: 'instant' });
   }
   ui.tabs.forEach((button, index) => {
@@ -794,6 +812,7 @@
     focusedGroupKey = null;
     ui.mapFloat.classList.add('hidden');
     ui.mapHint.classList.remove('hidden');
+    updateJourneyUI();
     markers.forEach(item => item.element.classList.remove('is-selected'));
   }
   function selectPinMarker(stopId, key = null) {
@@ -821,8 +840,9 @@
     ui.mapFloatActions.classList.remove('hidden');
     ui.mapFloat.classList.remove('hidden');
     ui.mapHint.classList.add('hidden');
+    updateJourneyUI();
     selectPinMarker(id);
-    if (fly && mapReady) map.easeTo({ center:[stop.lon,stop.lat], zoom:Math.max(15, map.getZoom()),duration:420 });
+    if (fly && mapReady) map.easeTo({ center:(() => {const p=displayPoint(stop);return [p.lon,p.lat];})(), zoom:Math.max(15, map.getZoom()), offset:[0,-90], duration:420 });
   }
   function openMapGroup(group, key) {
     focusedStopId = null;
@@ -843,6 +863,7 @@
     ui.mapFloatActions.classList.add('hidden');
     ui.mapFloat.classList.remove('hidden');
     ui.mapHint.classList.add('hidden');
+    updateJourneyUI();
     selectPinMarker(null, key);
   }
   ui.mapFloatClose.addEventListener('click', closeMapCard);
@@ -859,6 +880,15 @@
       map = new maplibregl.Map({ container: ui.map, style: CFG.mapStyle,
         center: [origin.lon, origin.lat], zoom: 12.8, attributionControl: true });
       mapInitialized = true;
+      // ResizeObserver keeps the canvas and marker positions synchronized with
+      // responsive layout changes; it is scoped to this single map instance.
+      if ('ResizeObserver' in window) {
+        mapSizeObserver?.disconnect();
+        mapSizeObserver = new ResizeObserver(() => {
+          if (activeTab === 'mapa' && map) map.resize();
+        });
+        mapSizeObserver.observe(ui.map);
+      }
       map.addControl(new maplibregl.NavigationControl({ showCompass:false }), 'bottom-right');
       map.on('load', () => {
         mapReady = true;
@@ -881,31 +911,46 @@
     }
   }
   function createMarker(label, type, lng, lat, onClick, stopId = null, key = null) {
-    const element = document.createElement('button');
-    element.type = 'button';
-    element.className = `map-pin ${type}`;
-    element.setAttribute('aria-label', 'Abrir detalhes: ' + label);
-    const text = document.createElement('span'); text.className='pin-label';text.textContent=label;
-    element.appendChild(text);
-    element.addEventListener('click', event => { event.stopPropagation(); onClick(); });
-    const marker = new maplibregl.Marker({ element, anchor: 'bottom' }).setLngLat([lng,lat]).addTo(map);
-    markers.push({marker,element,stopId,key});
+    // MapLibre atualiza a posição deste wrapper. O CSS só estiliza o botão interno.
+    // Assim animação/rotação do desenho não altera a âncora geográfica.
+    const anchor = document.createElement('div');
+    anchor.className = 'map-marker-anchor';
+    const visual = document.createElement('button');
+    visual.type = 'button';
+    visual.className = `map-pin ${type}`;
+    visual.setAttribute('aria-label', 'Abrir detalhes: ' + label);
+    const text = document.createElement('span'); text.className='pin-label'; text.textContent=label;
+    visual.appendChild(text);
+    visual.addEventListener('click', event => { event.stopPropagation(); onClick(); });
+    anchor.appendChild(visual);
+    const marker = new maplibregl.Marker({ element: anchor, anchor: 'bottom', offset: [0, 0] })
+      .setLngLat([lng,lat]).addTo(map);
+    markers.push({marker,element:visual,stopId,key});
+  }
+  // A coordenada original do endereço fica intacta. Se o endereço é apenas uma
+  // referência de rua e o encaixe foi CONFIRMADO pelo nome da via, exibir na via.
+  function displayPoint(stop) {
+    return stop.precision === 'aproximada' && stop.roadMatched === true &&
+      validPoint({lat:stop.navLat,lon:stop.navLon})
+      ? {lat:Number(stop.navLat),lon:Number(stop.navLon)}
+      : {lat:Number(stop.lat),lon:Number(stop.lon)};
   }
   function fitMap() {
     if (!mapReady) return;
-    const points = [[origin.lon,origin.lat],...stops.map(p=>[p.lon,p.lat])];
+    const points = [[origin.lon,origin.lat],...stops.map(p=>{const pt=displayPoint(p);return [pt.lon,pt.lat];})];
     if (!points.length) return;
     if (points.length === 1) { map.easeTo({center:points[0], zoom:14}); return; }
     const bounds = new maplibregl.LngLatBounds(points[0], points[0]);
     points.slice(1).forEach(p=>bounds.extend(p));
-    map.fitBounds(bounds, {padding:45,maxZoom:15,duration:450});
+    map.fitBounds(bounds, {padding:{top:75,bottom:routeValid()?180:55,left:55,right:55},maxZoom:15,duration:450});
   }
   function duplicateLocations() {
     const byPoint = new Map();
     stops.forEach(stop => {
       if (stop.concluida || stop.precision !== 'aproximada') return;
       // cerca de 3 metros: referência genérica compartilhada, não imóvel confirmado.
-      const key = `${Number(stop.lat).toFixed(5)}|${Number(stop.lon).toFixed(5)}`;
+      const point=displayPoint(stop);
+      const key = `${point.lat.toFixed(5)}|${point.lon.toFixed(5)}`;
       const group = byPoint.get(key) || [];
       group.push(stop);
       byPoint.set(key, group);
@@ -936,18 +981,20 @@
     const groups = new Map();
     stops.forEach(stop => {
       // Agrupar coordenadas idênticas evita que um pino esconda outro sem inventar posições.
-      const key = `${stop.lat.toFixed(5)}|${stop.lon.toFixed(5)}`;
+      const point=displayPoint(stop);
+      const key = `${point.lat.toFixed(5)}|${point.lon.toFixed(5)}`;
       if (!groups.has(key)) groups.set(key, []);
       groups.get(key).push(stop);
     });
     groups.forEach((group,key) => {
       const p = group[0];
+      const point=displayPoint(p);
       if (group.length > 1) {
-        createMarker(String(group.length),'group',p.lon,p.lat,()=>openMapGroup(group,key),null,key);
+        createMarker(String(group.length),'group',point.lon,point.lat,()=>openMapGroup(group,key),null,key);
       } else {
         const i = stops.findIndex(stop=>stop.id===p.id);
         createMarker(String(i+1), p.concluida?'done':next?.id===p.id?'next':p.precision!=='exata'?'uncertain':'',
-          p.lon,p.lat,()=>openMapCard(p.id),p.id);
+          point.lon,point.lat,()=>openMapCard(p.id),p.id);
       }
     });
     const line = routeValid() ? planned.geometry : null;
@@ -1003,7 +1050,7 @@
     ui.gps.textContent='● GPS ligado'; ui.gps.classList.add('active'); ui.gps.setAttribute('aria-pressed','true');
     gpsVisualTimer = setInterval(displayGps, 5000);
   });
-  window.addEventListener('pagehide', stopGPS);
+  window.addEventListener('pagehide', () => { stopGPS(); mapSizeObserver?.disconnect(); });
 
   // ---- Origin ----
   ui.originInput.value = origin.personalizado ? origin.endereco : '';
@@ -1066,9 +1113,7 @@
       current.navLon=road?road.lon:place.lon;
       // Para referência genérica de rua, alinhar o pino ao trecho com nome confirmado.
       // Para imóvel numerado, preservar o pino no próprio imóvel.
-      if (road && current.precision === 'aproximada') {
-        current.lat=road.lat; current.lon=road.lon;
-      }
+      current.roadMatched=Boolean(road);
       current.locationChecked=true;
       current.accessConfirmed=Boolean(road&&stop.precision==='exata');
       // Nunca mover a posição lat/lon do pino do imóvel para a rua.
@@ -1158,9 +1203,9 @@
           if (normalizeRoad(waypoint.name) !== normalizeRoad(stop.road)) return;
           const aligned={lat:Number(waypoint.location[1]),lon:Number(waypoint.location[0])};
           if (!validPoint(aligned) || meters(stop,aligned)>80) return;
-          stop.lat=aligned.lat;stop.lon=aligned.lon;
+          // Ponto de navegação na rua, sem mover a localização original do imóvel.
           stop.navLat=aligned.lat;stop.navLon=aligned.lon;
-          stop.locationChecked=true;
+          stop.roadMatched=true;stop.locationChecked=true;
         });
       }
       orderPending(ordered);
@@ -1293,7 +1338,62 @@
       ui.nextDone.onclick=()=>{ if(!target.concluida) toggleDone(target.id); };
     }else ui.arrived.classList.add('hidden');
   }
-  function drawAll(){renderStops();drawStats();renderMapRouteInfo();drawMap();}
+  function updateJourneyUI() {
+    const ready = Boolean(routeValid());
+    const pending = stops.filter(s => !s.concluida);
+    const current = pending[0] || null;
+    ui.routeMap.classList.toggle('hidden', !ready);
+    ui.dock.classList.toggle('hidden', !ready || activeTab === 'mapa');
+    ui.mapRunner.classList.toggle('hidden', !ready || !ui.mapFloat.classList.contains('hidden'));
+    ui.mapQuickInfo.textContent = ready
+      ? `${pending.length} pendentes  ·  ${planned.km.toFixed(1).replace('.',',')} km`
+      : `${stops.length} endereços  ·  ${stops.length ? 'otimize para traçar' : 'adicione suas entregas'}`;
+    if (!ready) return;
+    if (started && current) {
+      const n=stops.indexOf(current)+1;
+      ui.dockKicker.textContent = `ENTREGA ${n} DE ${stops.length}`;
+      ui.dockTitle.textContent = current.endereco;
+      ui.dockAction.textContent = '✓ Entregue';
+      ui.mapRunnerKicker.textContent = `DESTINO ATUAL · ${n} DE ${stops.length}`;
+      ui.mapRunnerAddress.textContent = current.endereco;
+      ui.mapRunnerDetail.textContent = current.precision === 'exata' ? 'Número identificado' : 'Localização aproximada: confira o número';
+      ui.mapRunnerMain.textContent = '✓ Entregue';
+      ui.mapRunnerMain.disabled = false;
+      ui.mapRunnerNavigate.href = locationURL(current);
+      ui.mapRunnerNavigate.classList.remove('hidden');
+    } else if (started && !current) {
+      ui.dockKicker.textContent = 'ROTA CONCLUÍDA';
+      ui.dockTitle.textContent = 'Todas as entregas finalizadas';
+      ui.dockAction.textContent = '✓ Feito';
+      ui.mapRunnerKicker.textContent = 'PARABÉNS!';
+      ui.mapRunnerAddress.textContent = 'Todas as entregas concluídas';
+      ui.mapRunnerDetail.textContent = 'Você concluiu sua rota.';
+      ui.mapRunnerMain.textContent = '✓ Concluído';
+      ui.mapRunnerMain.disabled = true;
+      ui.mapRunnerNavigate.classList.add('hidden');
+    } else {
+      ui.dockKicker.textContent = 'ROTA OTIMIZADA';
+      ui.dockTitle.textContent = `${pending.length} entregas · ${planned.km.toFixed(1).replace('.',',')} km`;
+      ui.dockAction.textContent = '▶ Começar';
+      ui.mapRunnerKicker.textContent = 'ROTA PRONTA';
+      ui.mapRunnerAddress.textContent = `${pending.length} paradas na melhor sequência estimada`;
+      ui.mapRunnerDetail.textContent = 'Confira os destinos e inicie sua rota';
+      ui.mapRunnerMain.textContent = '▶ Começar rota';
+      ui.mapRunnerMain.disabled = false;
+      ui.mapRunnerNavigate.classList.add('hidden');
+    }
+  }
+  const startOrComplete = () => {
+    if (!routeValid()) return;
+    if (!started) { ui.start.click(); return; }
+    const current = stops.find(s => !s.concluida);
+    if (current) toggleDone(current.id);
+  };
+  ui.routeMap.addEventListener('click', () => openTab('mapa'));
+  ui.dockMap.addEventListener('click', () => openTab('mapa'));
+  ui.dockAction.addEventListener('click', startOrComplete);
+  ui.mapRunnerMain.addEventListener('click', startOrComplete);
+  function drawAll(){renderStops();drawStats();renderMapRouteInfo();drawMap();updateJourneyUI();}
   ui.clean.addEventListener('click',()=>{
     const count=stops.filter(p=>p.concluida).length;
     if(!count){showToast('Nenhuma entrega concluída para remover.');return;}
