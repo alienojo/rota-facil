@@ -2,69 +2,124 @@
 <html lang="pt-BR">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="theme-color" content="#142b28">
-  <meta name="description" content="RotaFácil: encontre endereços pelo número, otimize a rota e acompanhe suas entregas.">
-  <title>RotaFácil · Seu dia no caminho certo</title>
-  <link rel="preconnect" href="https://photon.komoot.io">
-  <link rel="preconnect" href="https://viacep.com.br">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#102c2b">
+  <meta name="description" content="RotaFácil: adicione entregas, otimize seu percurso e acompanhe cada parada no mapa.">
+  <title>RotaFácil · Suas entregas, no caminho certo</title>
+  <link rel="preconnect" href="https://photon.komoot.io" crossorigin>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/maplibre-gl@5.6.2/dist/maplibre-gl.css">
   <link rel="stylesheet" href="style.css">
   <script defer src="https://cdn.jsdelivr.net/npm/maplibre-gl@5.6.2/dist/maplibre-gl.js"></script>
   <script defer src="app.js"></script>
 </head>
 <body>
-  <div class="shell">
-    <aside class="sidebar" aria-label="Menu">
-      <a href="#inicio" class="logo" aria-label="RotaFácil, início">
-        <span class="logo-mark" aria-hidden="true"><svg viewBox="0 0 36 36" fill="none"><path d="M8 10h14a6 6 0 0 1 0 12h-9a5 5 0 0 0 0 10h10" stroke="currentColor" stroke-width="4" stroke-linecap="round"/><circle cx="8" cy="10" r="4" fill="currentColor"/><path d="m24 27 5 5-5 4" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
-        <span>Rota<strong>Fácil</strong><small>ENTREGAS SEM COMPLICAÇÃO</small></span>
-      </a>
-      <div class="side-label">SEU DIA</div>
-      <nav class="nav">
-        <a href="#mapa" class="nav-link"><span class="nav-icon">◫</span> Mapa</a>
-        <a href="#adicionar" class="nav-link"><span class="nav-icon">＋</span> Adicionar entrega</a>
-        <a href="#entregas" class="nav-link"><span class="nav-icon">☷</span> Minha lista</a>
-        <a href="#resumo" class="nav-link"><span class="nav-icon">◔</span> Resultados</a>
-      </nav>
-      <div class="side-foot"><div class="online-dot"></div> Seus dados ficam salvos no navegador.<p>Um destino de cada vez.<br>Um dia mais leve.</p></div>
-    </aside>
+<div class="app-shell">
+  <aside class="sidebar">
+    <div class="sidebar-top">
+      <div class="brand" aria-label="RotaFácil">
+        <span class="brand-logo" aria-hidden="true">
+          <svg viewBox="0 0 44 44" fill="none"><path d="M11 12h16a7 7 0 0 1 0 14H18a6 6 0 0 0 0 12h12" stroke="currentColor" stroke-width="4" stroke-linecap="round"/><circle cx="11" cy="12" r="4" fill="currentColor"/><path d="m26 33 5 5-5 4" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </span>
+        <span class="brand-name">Rota<strong>Fácil</strong><small>Seu dia, mais simples.</small></span>
+      </div>
+      <p class="sidebar-eyebrow">ESPAÇO DE TRABALHO</p>
+    </div>
 
-    <main class="main" id="inicio">
-      <div class="mobile-brand"><span class="logo-mark small" aria-hidden="true">↝</span><strong>RotaFácil</strong></div>
-      <section class="hero" aria-labelledby="principal-titulo">
-        <div class="hero-copy"><span class="kicker">PLANEJAMENTO DE ENTREGAS</span><h1 id="principal-titulo">Sua rota, <span>sem desvios.</span></h1><p>Adicione seus endereços. Em seguida, otimize e comece suas entregas na própria lista.</p>
+    <nav class="tab-nav" role="tablist" aria-label="Áreas do aplicativo">
+      <button class="tab-button active" id="tab-entregas" type="button" role="tab" aria-controls="panel-entregas" aria-selected="true" tabindex="0" data-tab="entregas">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="3"/><path d="M8 9h8M8 13h8M8 17h5"/></svg>
+        <span>Entregas</span><span class="nav-counter" id="nav-count">0</span>
+      </button>
+      <button class="tab-button" id="tab-mapa" type="button" role="tab" aria-controls="panel-mapa" aria-selected="false" tabindex="-1" data-tab="mapa">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m3 6 6-3 6 3 6-3v15l-6 3-6-3-6 3zM9 3v15M15 6v15"/></svg>
+        <span>Mapa</span>
+      </button>
+      <button class="tab-button" id="tab-resumo" type="button" role="tab" aria-controls="panel-resumo" aria-selected="false" tabindex="-1" data-tab="resumo">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20V11M10 20V5M16 20v-9M22 20V8"/></svg>
+        <span>Resumo</span>
+      </button>
+    </nav>
+    <div class="sidebar-bottom"><span class="online-glow"></span> Rotas salvas neste navegador <small>Planeje. Otimize. Entregue.</small></div>
+  </aside>
 
-        </div>
-        <div class="hero-summary" aria-label="Resumo da rota"><div><span>ENTREGAS</span><strong id="hero-qtd">0</strong></div><div><span>DISTÂNCIA</span><strong id="hero-km">—</strong></div><div><span>TEMPO ESTIMADO</span><strong id="hero-min">—</strong></div></div>
-      </section>
+  <div class="content-shell">
+    <header class="topbar">
+      <div class="mobile-logo"><span aria-hidden="true">↝</span> Rota<strong>Fácil</strong></div>
+      <div class="topbar-title"><span class="eyebrow">SUA CENTRAL DE ROTAS</span><strong id="active-tab-title">Minhas entregas</strong></div>
+      <div class="topbar-status"><span class="status-dot"></span><span id="topbar-progress">Seu planejamento começa aqui</span></div>
+    </header>
 
-      <section class="section" id="mapa" aria-labelledby="titulo-mapa"><div class="heading"><div><span class="eyebrow">01 / VISUALIZAÇÃO</span><h2 id="titulo-mapa">Mapa da rota</h2></div><span id="map-badge" class="pill">Preparando entregas</span></div>
-        <div class="panel map-panel"><div class="map-toolbar"><div><strong>Mapa e destinos</strong><small id="map-status" role="status">Os pontos aparecem assim que você adiciona entregas.</small></div><div class="toolbar-actions"><button id="btn-gps" class="small-btn" type="button" aria-pressed="false">◎ GPS ao vivo</button><button id="btn-enquadrar" class="small-btn" type="button" aria-label="Mostrar todos os pontos">⛶</button></div></div><div class="map-holder"><div id="map" role="region" aria-label="Mapa com as entregas cadastradas"></div><div id="map-placeholder" class="map-placeholder hidden">Mapa indisponível agora. Você ainda pode cadastrar as entregas normalmente.</div></div><div class="map-footer"><span id="gps-message">● Origem &nbsp; ● Entregas &nbsp; ● GPS</span><span id="map-provider">Dados de mapa © OpenStreetMap</span></div></div>
-        <details class="origin-settings"><summary>⌖ Ponto de partida <span id="origin-label">São José dos Campos, SP</span><span class="chevron">⌄</span></summary><div class="origin-controls"><input id="origin-input" class="field" placeholder="Rua, número, cidade" autocomplete="street-address"><button id="btn-definir-origem" class="btn btn-dark" type="button">Definir origem</button><button id="btn-origem-gps" class="btn btn-soft" type="button">◎ Meu GPS</button></div><p id="origin-status">Por padrão, a rota começa no centro de São José dos Campos.</p></details>
-        <article id="next-stop" class="next-stop hidden" aria-live="polite"><div class="next-head"><span>PRÓXIMA ENTREGA</span><small id="next-progress"></small></div><div class="next-main"><span id="next-number" class="stop-number">1</span><strong id="next-address"></strong></div><p id="arrival-note" class="arrival-note hidden"></p><div class="next-actions"><a id="next-navigate" class="btn btn-lime" href="#" target="_blank" rel="noopener noreferrer">↗ Navegar</a><button id="next-done" class="btn btn-outline" type="button">✓ Entregue</button></div></article>
-      </section>
+    <main class="workspace">
+      <!-- ENTREGAS: A home do motorista, com cadastro e sequência em uma única aba. -->
+      <section class="tab-panel" id="panel-entregas" role="tabpanel" aria-labelledby="tab-entregas">
+        <div class="page-head"><div><span class="overline">PLANEJE SEU DIA</span><h1>Suas entregas<span class="accent-point">.</span></h1><p>Adicione todos os endereços e otimize a rota quando terminar.</p></div><span class="count-pill" id="count-badge">0 paradas</span></div>
 
-      <section class="section" id="adicionar" aria-labelledby="titulo-adicionar"><div class="heading"><div><span class="eyebrow">02 / CADASTRO RÁPIDO</span><h2 id="titulo-adicionar">Adicionar endereço</h2></div><span class="helper">Digite · escolha · adicione</span></div>
-        <div class="panel add-panel"><div class="add-intro"><span class="add-icon">⌖</span><div><h3>Qual é a próxima entrega?</h3><p>Digite rua e número para encontrar sugestões automaticamente.</p></div></div>
-          <form id="form-add" novalidate><label for="address-input" class="field-label">ENDEREÇO DA ENTREGA</label>
-            <div class="add-controls"><div class="address-wrap" id="address-wrap"><span class="search-icon" aria-hidden="true">⌕</span><input id="address-input" type="text" placeholder="Ex.: Rua Votuporanga 264" autocomplete="off" role="combobox" aria-autocomplete="list" aria-controls="address-options" aria-expanded="false" aria-activedescendant="" spellcheck="false"><span id="search-loading" class="spinner hidden" aria-label="Buscando"></span><div id="address-options" class="suggestions hidden" role="listbox" aria-label="Sugestões de endereço"></div></div><button id="btn-adicionar" class="btn btn-dark btn-add" type="submit">＋ Adicionar entrega</button></div>
-            <p id="address-message" class="help-message" role="status" aria-live="polite">Digite rua e número. Escolha uma sugestão e adicione a entrega.</p>
-            <button id="btn-cancel-edit" class="cancel-edit hidden" type="button">Cancelar edição e voltar a adicionar entregas</button>
-            <details class="city-settings"><summary>Pesquisar em outra cidade</summary><div class="city-controls"><label>Cidade<input id="city-input" type="text" value="São José dos Campos" autocomplete="address-level2"></label><label>UF<input id="state-input" type="text" value="SP" maxlength="2" autocomplete="address-level1"></label></div></details>
+        <section class="card add-card" aria-labelledby="add-title">
+          <div class="card-head"><div class="head-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></div><div><span class="overline">NOVA PARADA</span><h2 id="add-title">Adicionar endereço</h2></div></div>
+          <form id="form-add" novalidate>
+            <label class="field-label" for="address-input">Rua, número e bairro</label>
+            <div class="address-form-row">
+              <div class="address-wrap" id="address-wrap"><svg class="search-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m15.5 15.5 5 5"/></svg><input id="address-input" type="text" autocomplete="off" spellcheck="false" placeholder="Ex.: Rua Votuporanga 264" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="address-options" aria-activedescendant=""><button id="btn-scan" type="button" class="scan-button" title="Escanear endereço com a câmera" aria-label="Escanear endereço usando a câmera">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7V5a2 2 0 0 1 2-2h2m8 0h2a2 2 0 0 1 2 2v2M4 17v2a2 2 0 0 0 2 2h2m8 0h2a2 2 0 0 0 2-2v-2M7 12h10M12 7v10"/></svg>
+                <span id="scan-label">Escanear</span>
+              </button>
+              <input id="scan-file" type="file" accept="image/*" capture="environment" hidden aria-label="Foto de um endereço">
+              <span id="search-loading" class="spinner hidden" aria-label="Buscando endereços"></span><div id="address-options" class="suggestions hidden" role="listbox" aria-label="Sugestões de endereço"></div></div>
+              <button id="btn-adicionar" class="btn btn-dark add-button" type="submit"><span aria-hidden="true">＋</span> Adicionar</button>
+            </div>
+            <p id="address-message" class="help-message" role="status" aria-live="polite">Digite e selecione uma sugestão. O número da casa será mantido.</p>
+            <button id="btn-cancel-edit" type="button" class="text-button hidden">Cancelar edição</button>
+            <details class="city-settings"><summary>Endereço em outra cidade?</summary><div class="city-controls"><label>Cidade<input id="city-input" type="text" value="São José dos Campos" autocomplete="address-level2"></label><label>UF<input id="state-input" type="text" maxlength="2" value="SP" autocomplete="address-level1"></label></div></details>
           </form>
-        </div>
+        </section>
+
+        <section class="route-actions-card" aria-labelledby="route-title">
+          <div><span class="overline inverse">SUA ROTA</span><h2 id="route-title">Pronto para começar?</h2><p id="hero-notice" role="status" aria-live="polite">Adicione entregas para planejar seu trajeto.</p></div>
+          <div class="route-action-buttons"><button id="btn-otimizar" class="btn btn-lime" type="button">✦ Otimizar rota</button><button id="btn-iniciar" class="btn btn-contrast" type="button" disabled>▶ Começar rota</button></div>
+        </section>
+
+        <section class="card list-card" aria-labelledby="list-title">
+          <div class="list-head"><div><span class="overline">ORDEM DAS PARADAS</span><h2 id="list-title">Lista de entregas</h2><p id="list-subtitle">Nenhuma entrega adicionada.</p></div><button id="btn-open-map" type="button" class="mini-link">Ver mapa <span aria-hidden="true">↗</span></button></div>
+          <div id="stops-list" class="stops-list" aria-live="polite"></div>
+          <div class="list-footer"><button id="btn-limpar-feitas" type="button">Remover concluídas</button><button id="btn-apagar-tudo" type="button">Apagar tudo</button></div>
+        </section>
       </section>
 
-      <section class="section" id="entregas" aria-labelledby="titulo-entregas"><div class="heading"><div><span class="eyebrow">03 / ORGANIZAÇÃO</span><h2 id="titulo-entregas">Minha lista de entregas</h2></div><span id="count-badge" class="pill">0 paradas</span></div><div class="route-action-bar" aria-label="Planejamento da rota">
-          <div class="route-action-heading"><strong>Pronto para organizar suas entregas?</strong><p id="hero-notice" role="status" aria-live="polite">Adicione suas entregas para começar.</p></div>
-          <div class="hero-actions"><button id="btn-otimizar" class="btn btn-lime" type="button">✦ <span>Otimizar rota</span></button><button id="btn-iniciar" class="btn btn-outline" type="button" disabled>▶ Começar rota</button></div>
-        </div><div class="panel list-panel"><div class="list-heading"><div><strong>Seus destinos</strong><p id="list-subtitle">Nenhuma entrega adicionada.</p></div><span class="muted-hint">A ordem muda somente após otimizar</span></div><div id="stops-list" class="stops-list" aria-live="polite"></div><div class="list-footer"><button id="btn-limpar-feitas" type="button">Remover concluídas</button><button id="btn-apagar-tudo" type="button">Apagar rota</button></div></div></section>
+      <!-- MAPA: área isolada, com cartão flutuante ativado pelo pino. -->
+      <section class="tab-panel" id="panel-mapa" role="tabpanel" aria-labelledby="tab-mapa" hidden>
+        <div class="page-head map-page-head"><div><span class="overline">ACOMPANHE CADA DESTINO</span><h1>Seu mapa<span class="accent-point">.</span></h1><p>Toque em um pino para abrir os detalhes da entrega.</p></div><span id="map-badge" class="count-pill">Em preparação</span></div>
+        <div class="map-card">
+          <div class="map-toolbar"><div><strong>Visão geral da rota</strong><small id="map-status" role="status">Os destinos aparecem após o cadastro.</small></div><div class="map-toolbar-actions"><button id="btn-gps" type="button" class="map-tool" aria-pressed="false">◎ GPS</button><button id="btn-enquadrar" type="button" class="map-tool fit" title="Enquadrar entregas" aria-label="Enquadrar entregas">⛶</button></div></div>
+          <div class="map-stage">
+            <div id="map" aria-label="Mapa das entregas" role="region"></div>
+            <div id="map-placeholder" class="map-placeholder hidden">Mapa indisponível agora. Continue cadastrando suas entregas normalmente.</div>
+            <div class="map-hint" id="map-hint">⌖ Toque em um pino para ver o endereço</div>
+            <article id="map-float" class="map-float hidden" aria-live="polite" aria-label="Detalhes da parada selecionada">
+              <button id="map-float-close" type="button" class="map-float-close" aria-label="Fechar detalhes">×</button>
+              <div class="map-float-top"><span class="map-float-dot"></span><span id="map-float-label">PARADA 01</span><span id="map-float-status" class="float-status">Pendente</span></div>
+              <h2 id="map-float-address">Endereço</h2>
+              <p id="map-float-detail">Toque para abrir os detalhes da entrega.</p>
+              <div id="map-float-choices" class="map-float-choices hidden"></div>
+              <div id="map-float-actions" class="map-float-actions"><a id="map-float-navigate" href="#" class="btn btn-dark" target="_blank" rel="noopener noreferrer">↗ Navegar</a><button id="map-float-done" type="button" class="btn btn-outline">✓ Entregue</button><button id="map-float-edit" type="button" class="map-float-edit">Editar</button></div>
+            </article>
+          </div>
+          <div class="map-footer"><span id="gps-message">● Origem &nbsp; ● Entregas &nbsp; ● GPS</span><small id="map-provider">Dados de mapa © OpenStreetMap</small></div>
+        </div>
+        <details class="origin-settings"><summary>⌖ Ponto de partida <strong id="origin-label">São José dos Campos, SP</strong><span aria-hidden="true">⌄</span></summary><div class="origin-controls"><input id="origin-input" class="field" type="text" placeholder="Rua, número e cidade"><button id="btn-definir-origem" class="btn btn-dark" type="button">Definir origem</button><button id="btn-origem-gps" class="btn btn-outline" type="button">◎ Meu GPS</button></div><p id="origin-status">Por padrão, a rota começa no centro de São José dos Campos.</p></details>
+        <article id="next-stop" class="next-stop hidden"><div class="next-head"><span>PRÓXIMA ENTREGA</span><small id="next-progress"></small></div><div class="next-main"><span id="next-number" class="next-index">1</span><strong id="next-address"></strong></div><p id="arrival-note" class="arrival-note hidden"></p><div class="next-actions"><a id="next-navigate" class="btn btn-lime" href="#" target="_blank" rel="noopener noreferrer">↗ Navegar</a><button id="next-done" class="btn btn-outline" type="button">✓ Entregue</button></div></article>
+      </section>
 
-      <section class="section" id="resumo" aria-labelledby="titulo-resumo"><div class="heading"><div><span class="eyebrow">04 / PROGRESSO</span><h2 id="titulo-resumo">Resultados</h2></div></div><div class="stat-grid"><div class="stat dark"><span>PARADAS</span><strong id="stat-total">0</strong><small>Na sua rota</small></div><div class="stat"><span>PENDENTES</span><strong id="stat-pendentes">0</strong><small>Por entregar</small></div><div class="stat"><span>CONCLUÍDAS</span><strong id="stat-concluidas">0</strong><small>Entregues</small></div><div class="stat"><span>PROGRESSO</span><strong id="stat-percent">0%</strong><div class="progress"><span id="progress-bar"></span></div></div></div></section>
-      <footer class="foot">RotaFácil © 2026 · Planeje, otimize e entregue.</footer>
+      <!-- RESUMO: indicadores separados do fluxo de cadastro. -->
+      <section class="tab-panel" id="panel-resumo" role="tabpanel" aria-labelledby="tab-resumo" hidden>
+        <div class="page-head"><div><span class="overline">ACOMPANHAMENTO</span><h1>Seu progresso<span class="accent-point">.</span></h1><p>Uma visão rápida de tudo que você já entregou.</p></div></div>
+        <div class="stats-grid"><div class="stat stat-dark"><span>TOTAL DE PARADAS</span><strong id="stat-total">0</strong><small>Destinos na lista</small></div><div class="stat"><span>AINDA FALTAM</span><strong id="stat-pendentes">0</strong><small>Entregas pendentes</small></div><div class="stat"><span>CONCLUÍDAS</span><strong id="stat-concluidas">0</strong><small>Entregas realizadas</small></div><div class="stat stat-lime"><span>PROGRESSO</span><strong id="stat-percent">0%</strong><div class="progress"><span id="progress-bar"></span></div></div></div>
+        <div class="card journey-card"><div><span class="overline">PLANEJAMENTO</span><h2>Sua rota de hoje</h2><p>Os valores aparecem quando você terminar de cadastrar e clicar em otimizar.</p></div><div class="journey-data"><div><span>PARADAS PENDENTES</span><strong id="hero-qtd">0</strong></div><div><span>DISTÂNCIA</span><strong id="hero-km">—</strong></div><div><span>TEMPO ESTIMADO</span><strong id="hero-min">—</strong></div></div></div>
+        <button id="btn-back-deliveries" type="button" class="btn btn-dark back-deliveries">↖ Voltar às entregas</button>
+      </section>
     </main>
+    <footer class="app-footer">RotaFácil © 2026 · Organize seu dia. O resto é caminho.</footer>
   </div>
-  <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
+</div>
+<div id="toast" role="status" aria-live="polite" class="toast hidden"></div>
 </body>
 </html>

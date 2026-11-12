@@ -1,14 +1,14 @@
 (() => {
   'use strict';
 
-  // RotaFácil V11 — imóvel mapeado, interpolação prudente e navegação separada do pino.
+  // RotaFácil V13 — navegação por abas e cartões flutuantes sobre o mapa.
   // Photon oferece busca conforme digita; ViaCEP complementa rua, bairro e CEP.
   // Para escala comercial, hospede um serviço de geocodificação com SLA/proxy próprio.
   const CFG = Object.freeze({
     photon: 'https://photon.komoot.io', viaCep: 'https://viacep.com.br/ws',
     osrm: 'https://router.project-osrm.org',
     overpass: 'https://overpass-api.de/api/interpreter',
-    addressLookupRadius: 1500, addressLookupTimeout: 6500,
+    addressLookupRadius: 2500, addressLookupTimeout: 7500,
     mapStyle: 'https://tiles.openfreemap.org/styles/positron',
     debounceMs: 480, timeoutMs: 9000, maxStopsForRoadMatrix: 23, maxAddressChecks: 6,
     defaultOrigin: { endereco: 'Centro de São José dos Campos, SP', lat: -23.1794, lon: -45.8869, personalizado: false }
@@ -16,6 +16,7 @@
   const ID = id => document.getElementById(id);
   const ui = {
     input: ID('address-input'), listbox: ID('address-options'), searchLoading: ID('search-loading'),
+    scan: ID('btn-scan'), scanLabel: ID('scan-label'), scanFile: ID('scan-file'),
     form: ID('form-add'), add: ID('btn-adicionar'), help: ID('address-message'), cancelEdit: ID('btn-cancel-edit'),
     city: ID('city-input'), state: ID('state-input'),
     optimize: ID('btn-otimizar'), start: ID('btn-iniciar'), heroNotice: ID('hero-notice'),
@@ -30,9 +31,20 @@
     percent: ID('stat-percent'), progressBar: ID('progress-bar'),
     next: ID('next-stop'), nextNumber: ID('next-number'), nextAddress: ID('next-address'),
     nextProgress: ID('next-progress'), nextNavigate: ID('next-navigate'), nextDone: ID('next-done'),
-    arrived: ID('arrival-note'), toast: ID('toast')
+    arrived: ID('arrival-note'), toast: ID('toast'),
+    tabs: [ID('tab-entregas'), ID('tab-mapa'), ID('tab-resumo')],
+    panels: [ID('panel-entregas'), ID('panel-mapa'), ID('panel-resumo')],
+    activeTabTitle: ID('active-tab-title'), topbarProgress: ID('topbar-progress'), navCount: ID('nav-count'),
+    openMap: ID('btn-open-map'), backDeliveries: ID('btn-back-deliveries'),
+    mapFloat: ID('map-float'), mapFloatClose: ID('map-float-close'),
+    mapFloatLabel: ID('map-float-label'), mapFloatStatus: ID('map-float-status'),
+    mapFloatAddress: ID('map-float-address'), mapFloatDetail: ID('map-float-detail'),
+    mapFloatNavigate: ID('map-float-navigate'), mapFloatDone: ID('map-float-done'),
+    mapFloatEdit: ID('map-float-edit'), mapFloatChoices: ID('map-float-choices'),
+    mapFloatActions: ID('map-float-actions'), mapHint: ID('map-hint')
   };
-  const missing = Object.entries(ui).filter(([,element]) => !element).map(([key]) => key);
+  const missing = Object.entries(ui).flatMap(([key, element]) =>
+    Array.isArray(element) ? element.some(item => !item) ? [key] : [] : !element ? [key] : []);
   if (missing.length) { console.error('RotaFácil: elementos não encontrados:', missing); return; }
 
   const STORE = { stops: 'rotafacil_paradas', origin: 'rotafacil_origem', started: 'rotafacil_iniciada', route: 'rotafacil_v9_rota', searchArea: 'rotafacil_v9_area' };
@@ -57,7 +69,7 @@
       propertyLon: validPoint({lat:item.propertyLat,lon:item.propertyLon}) ? Number(item.propertyLon) : Number(item.lon),
       navLat: validPoint({lat:item.navLat,lon:item.navLon}) ? Number(item.navLat) : Number(item.lat),
       navLon: validPoint({lat:item.navLat,lon:item.navLon}) ? Number(item.navLon) : Number(item.lon),
-      locationChecked: Boolean(item.locationChecked), accessConfirmed: Boolean(item.accessConfirmed)
+      locationChecked: Boolean(item.locationChecked), accessConfirmed: Boolean(item.accessConfirmed), locationSource: String(item.locationSource || '')
     };
   }
   let stops = (Array.isArray(getJSON(STORE.stops, [])) ? getJSON(STORE.stops, []) : []).map(cleanedStop).filter(Boolean);
@@ -85,6 +97,7 @@
   let photonQueue = Promise.resolve();
   let map = null, mapReady = false, gpsMarker = null, gpsAccuracyMarker = null, markers = [];
   let gpsWatchId = null, gpsVisualTimer = null, gpsFix = null, activeArrivalId = null;
+  let activeTab = 'entregas', mapInitialized = false, focusedStopId = null, focusedGroupKey = null;
 
   function signature() { return JSON.stringify({ origin: [origin.lat, origin.lon], stops: stops.map(p => [p.id, p.lat, p.lon, p.navLat, p.navLon, p.concluida]) }); }
   function routeValid() { return planned && planned.signature === signature() && Array.isArray(planned.order) && planned.order.length > 0; }
@@ -147,7 +160,7 @@
     return { road: road || cleaned, number, extra, postcode, raw };
   }
   // Parsing fixture exposed for automated checks without exposing implementation to page UI.
-  window.__rotafacilTest = Object.freeze({ parseAddress, normalizeRoad });
+  window.__rotafacilTest = Object.freeze({ parseAddress, normalizeRoad, meters, getOSMAddressMatches: (...args) => getOSMAddressMatches(...args) });
 
   async function getJSONRemote(url, { signal, timeout = CFG.timeoutMs } = {}) {
     const controller = new AbortController();
@@ -410,6 +423,75 @@
   });
   for (const input of [ui.city, ui.state]) input.addEventListener('change', () => { selected = null; inputChange(); save(); });
 
+  // ---- Leitor de endereços: um botão, captura de foto no celular e OCR local. ----
+  // Tesseract.js é carregado somente quando o usuário realmente seleciona uma imagem.
+  // O texto lido é colocado no campo existente, sem cadastrar uma entrega automaticamente.
+  let ocrLoadingPromise = null;
+  function carregarOCR() {
+    if (window.Tesseract?.recognize) return Promise.resolve();
+    if (ocrLoadingPromise) return ocrLoadingPromise;
+    ocrLoadingPromise = new Promise((resolve, reject) => {
+      const script = document.createElement('script');
+      script.src = 'https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js';
+      script.async = true;
+      script.onload = () => window.Tesseract?.recognize ? resolve() : reject(new Error('Reconhecimento de texto indisponível.'));
+      script.onerror = () => reject(new Error('Não foi possível carregar o leitor. Verifique sua internet.'));
+      document.head.appendChild(script);
+    }).catch(error => { ocrLoadingPromise = null; throw error; });
+    return ocrLoadingPromise;
+  }
+
+  function extrairEnderecoDeFoto(texto) {
+    // Primeiro uma linha contendo tipo de logradouro; só complementa com a seguinte
+    // se esta trouxer explicitamente o número ou o bairro.
+    const linhas = String(texto || '').split(/[\r\n]+/)
+      .map(p => p.replace(/\s+/g, ' ').trim()).filter(Boolean);
+    const ruaPattern = /\b(?:rua|r\.|avenida|av\.?|travessa|alameda|estrada|rodovia|praça|praca|largo|viela)\b/i;
+    const indice = linhas.findIndex(p => ruaPattern.test(p));
+    if (indice === -1) return '';
+    let endereco = linhas[indice].slice(linhas[indice].search(ruaPattern));
+    const detalhes = linhas.slice(indice + 1, indice + 3);
+    if (!parseAddress(endereco).number) {
+      const n = detalhes.find(p => /^(?:n(?:ú|u)mero|n[º°o]?\.?|#)?\s*[:.#-]?\s*\d{1,5}[A-Za-z]?\b/i.test(p));
+      if (n) endereco += ', ' + n.replace(/^(?:n(?:ú|u)mero|n[º°o]?\.?|#)\s*[:.#-]?\s*/i, '');
+    }
+    const bairro = detalhes.find(p => /\bbairro\b/i.test(p));
+    if (bairro && !endereco.toLowerCase().includes(bairro.toLowerCase())) endereco += ', ' + bairro;
+    return endereco.replace(/\s+/g, ' ').trim().slice(0, 220);
+  }
+
+  ui.scan.addEventListener('click', () => { if (!ui.scan.disabled) ui.scanFile.click(); });
+  ui.scanFile.addEventListener('change', async () => {
+    const arquivo = ui.scanFile.files?.[0];
+    if (!arquivo) return;
+    ui.scanFile.value = '';
+    if (!arquivo.type.startsWith('image/')) {
+      textStatus('Escolha uma foto ou imagem do endereço.', true); return;
+    }
+    if (arquivo.size > 12 * 1024 * 1024) {
+      textStatus('A foto é muito grande. Use uma imagem de até 12 MB.', true); return;
+    }
+    ui.scan.disabled = true;
+    ui.scanLabel.textContent = 'Lendo...';
+    textStatus('Lendo o endereço da foto...');
+    try {
+      await carregarOCR();
+      const result = await window.Tesseract.recognize(arquivo, 'por');
+      const endereco = extrairEnderecoDeFoto(result?.data?.text);
+      if (!endereco) throw new Error('Não identifiquei uma rua na foto. Tire outra foto com o endereço mais nítido.');
+      ui.input.value = endereco;
+      inputChange(); // inicia o autocompletar normal do RotaFácil
+      textStatus('Endereço lido. Confira o número e selecione uma sugestão antes de adicionar.');
+      ui.input.focus();
+    } catch (error) {
+      console.warn('Leitura da foto:', error);
+      textStatus(error.message || 'Não foi possível ler o endereço da foto.', true);
+    } finally {
+      ui.scan.disabled = false;
+      ui.scanLabel.textContent = 'Escanear';
+    }
+  });
+
   // ---- Geocodificação por número antes de aceitar o centro da rua. ----
   // "Exata" indica que um cadastro identificou rua + número, não que conhecemos a porta.
   // "estimada" usa duas numerações da mesma rua e mesma paridade.
@@ -423,53 +505,69 @@
   const escapeOverpass = str => String(str).replace(/\\/g,'\\\\').replace(/"/g,'\\"');
   const escapePattern = str => String(str).replace(/[.*+?^${}()|[\]\\]/g,'\\$&');
 
-  function getOSMAddressMatches(elements,road,house,point) {
-    const relevant=(Array.isArray(elements)?elements:[]).filter(e=>
-      normalizeRoad(e.tags?.['addr:street'])===normalizeRoad(road))
-      .map(e=>({house:String(e.tags?.['addr:housenumber']||''),
-        lat:Number(e.lat??e.center?.lat),lon:Number(e.lon??e.center?.lon),
-        city:String(e.tags?.['addr:city']||''),postcode:String(e.tags?.['addr:postcode']||''),
-        tags:e.tags||{}}))
-      .filter(validPoint)
-      .filter(p=>!point||meters(p,point)<=CFG.addressLookupRadius+150);
-    const direct=relevant.filter(p=>norm(p.house)===norm(house)).sort((a,b)=>meters(a,point)-meters(b,point));
-    if (direct.length) return {...direct[0],precision:'exata'};
+  // Somente números documentados na MESMA rua podem dar origem à estimativa.
+  // Nunca deduzir uma localização a partir do número isolado (10, 590 etc.).
+  function getOSMAddressMatches(elements, road, house, point, city = '', district = '') {
+    const targetRoad = normalizeRoad(road);
+    const relevant = (Array.isArray(elements) ? elements : []).filter(e =>
+      normalizeRoad(e.tags?.['addr:street']) === targetRoad)
+      .map(e => ({
+        house: String(e.tags?.['addr:housenumber'] || ''),
+        lat: Number(e.lat ?? e.center?.lat), lon: Number(e.lon ?? e.center?.lon),
+        city: String(e.tags?.['addr:city'] || ''),
+        district: String(e.tags?.['addr:suburb'] || e.tags?.['addr:district'] || ''),
+        tags: e.tags || {}
+      })).filter(validPoint)
+      .filter(p => (!point || meters(p, point) <= CFG.addressLookupRadius + 200) &&
+        (!city || !p.city || norm(city) === norm(p.city)));
+    const direct = relevant.filter(p => norm(p.house) === norm(house))
+      .sort((a, b) => Number(Boolean(district && norm(a.district) === norm(district))) * -1 +
+        Number(Boolean(district && norm(b.district) === norm(district))) || meters(a, point) - meters(b, point));
+    if (direct.length) return { ...direct[0], precision: 'exata', source: 'osm-number' };
 
-    const target=houseDigits(house);
+    const target = houseDigits(house);
     if (!Number.isFinite(target)) return null;
-    // Não interpolar casas em lados opostos da via: usar a mesma paridade.
-    const sameSide=relevant.filter(p=>houseDigits(p.house)!==null && houseDigits(p.house)%2===target%2)
-      .sort((a,b)=>houseDigits(a.house)-houseDigits(b.house));
-    const estimates=[];
-    for (let i=0;i<sameSide.length-1;i++) {
-      const a=sameSide[i],b=sameSide[i+1];
-      const first=houseDigits(a.house),last=houseDigits(b.house);
-      if (first>=target||last<=target||last-first>40||meters(a,b)>180) continue;
-      const t=(target-first)/(last-first);
-      estimates.push({lat:a.lat+(b.lat-a.lat)*t,lon:a.lon+(b.lon-a.lon)*t,
-        precision:'estimada',interval:last-first,distance:meters(a,b),
-        near:Math.min(meters(a,point),meters(b,point))});
+    const sameParity = relevant.filter(p => houseDigits(p.house) !== null &&
+      houseDigits(p.house) % 2 === target % 2).sort((a,b) => houseDigits(a.house) - houseDigits(b.house));
+    const guesses = [];
+    for (let i = 0; i < sameParity.length - 1; i++) {
+      const a = sameParity[i], b = sameParity[i + 1];
+      const low = houseDigits(a.house), high = houseDigits(b.house);
+      if (low >= target || high <= target) continue;
+      const gap = high - low, length = meters(a,b);
+      // Avenida longa: permitir intervalos maiores somente com dois pontos existentes
+      // e distância física coerente, sem extrapolação fora das âncoras.
+      if (gap > 1000 || length > 1100 || length < 6 || length/gap < 0.22 || length/gap > 12) continue;
+      // Evitar estimativa que atravesse vários quarteirões sem informação.
+      if (gap > 160 && length > 650) continue;
+      if (district && a.district && b.district && norm(a.district) !== norm(b.district)) continue;
+      const t = (target - low) / gap;
+      const latitude = a.lat + (b.lat - a.lat) * t;
+      const longitude = a.lon + (b.lon - a.lon) * t;
+      guesses.push({lat: latitude, lon: longitude, precision: 'estimada', source: 'osm-interpolation',
+        gap, length, proximity: point ? Math.min(meters(a, point), meters(b, point)) : 0 });
     }
-    estimates.sort((a,b)=>a.interval-b.interval||a.distance-b.distance||a.near-b.near);
-    return estimates[0]||null;
+    guesses.sort((a,b) => a.gap-b.gap || a.length-b.length || a.proximity-b.proximity);
+    return guesses[0] || null;
   }
 
-  async function queryOSMAddress(road,house,approximate,signal) {
+  async function queryOSMAddress(road, house, approximate, signal, city = '', district = '') {
     if (!validPoint(approximate)) return null;
-    const key=`${norm(road)}|${norm(house)}|${approximate.lat.toFixed(3)}|${approximate.lon.toFixed(3)}`;
+    const key = `${norm(road)}|${norm(house)}|${norm(city)}|${approximate.lat.toFixed(3)}|${approximate.lon.toFixed(3)}`;
     if (addressCache.has(key)) return addressCache.get(key);
-    const core=normalizeRoad(road);
-    if (core.length<3) return null;
-    const regex=escapeOverpass(escapePattern(core));
-    const num=escapeOverpass(house);
-    const radius=CFG.addressLookupRadius;
-    // uma única consulta traz número exato e âncoras da mesma rua para interpolação
-    const q=`[out:json][timeout:6];(nwr(around:${radius},${approximate.lat},${approximate.lon})["addr:housenumber"="${num}"];nwr(around:${radius},${approximate.lat},${approximate.lon})["addr:street"~"${regex}",i]["addr:housenumber"];);out center 160;`;
-    const data=await getJSONRemote(`${CFG.overpass}?data=${encodeURIComponent(q)}`,
+    const core = normalizeRoad(road);
+    if (core.length < 3) return null;
+    const regex = escapeOverpass(escapePattern(core));
+    const num = escapeOverpass(house);
+    const radius = CFG.addressLookupRadius;
+    // Endereços explicitamente numerados da mesma rua.
+    // Usar GET na versão sem servidor; falhas preservam a posição aproximada.
+    const q = `[out:json][timeout:7];(nwr(around:${radius},${approximate.lat},${approximate.lon})["addr:housenumber"="${num}"];nwr(around:${radius},${approximate.lat},${approximate.lon})["addr:street"~"${regex}",i]["addr:housenumber"];);out center 250;`;
+    const data = await getJSONRemote(`${CFG.overpass}?data=${encodeURIComponent(q)}`,
       {signal,timeout:CFG.addressLookupTimeout});
-    const hit=getOSMAddressMatches(data.elements,road,house,approximate);
+    const hit = getOSMAddressMatches(data.elements,road,house,approximate,city,district);
     addressCache.set(key,hit);
-    if(addressCache.size>45)addressCache.delete(addressCache.keys().next().value);
+    if (addressCache.size>45) addressCache.delete(addressCache.keys().next().value);
     return hit;
   }
 
@@ -493,7 +591,7 @@
 
     // Se o próprio resultado é um imóvel numerado, utilizar o ponto do imóvel.
     if(house && hasMatchingAddress(candidate,road,house,city)) {
-      return {...original,precision:'exata'};
+      return {...original,precision:'exata',source:'photon-number'};
     }
 
     let reference=original;
@@ -504,23 +602,23 @@
         (!c.city||norm(c.city)===norm(city))).sort((a,b)=>score(b,q,{city,uf})-score(a,q,{city,uf}))[0];
       if(!suitable)throw new Error('Não conseguimos posicionar essa rua. Escolha outra sugestão.');
       reference={lat:suitable.lat,lon:suitable.lon};
-      if(house && hasMatchingAddress(suitable,road,house,city))return {...reference,precision:'exata'};
+      if(house && hasMatchingAddress(suitable,road,house,city))return {...reference,precision:'exata',source:'photon-number'};
     }
-    if(!house)return {...reference,precision:'aproximada'};
+    if(!house)return {...reference,precision:'aproximada',source:'street-reference'};
 
     // Buscar casa mapeada antes do fallback para o ponto central da rua.
     // As duas fontes são independentes: uma falha não impede o cadastro.
     const jobs=[photonExactHouse(road,house,city,uf,signal).then(p=>
-      p?{lat:p.lat,lon:p.lon,precision:'exata'}:null).catch(error=>{
+      p?{lat:p.lat,lon:p.lon,precision:'exata',source:'photon-number'}:null).catch(error=>{
         if(signal?.aborted)throw error; console.warn('Endereço por número indisponível:',error);return null;
-      }), queryOSMAddress(road,house,reference,signal).catch(error=>{
+      }), queryOSMAddress(road,house,reference,signal,city,candidate.district||'').catch(error=>{
         if(signal?.aborted)throw error;console.warn('Imóveis OSM indisponíveis:',error);return null;
       })];
     const results=await Promise.all(jobs);
     const exact=results.find(p=>p?.precision==='exata');
     if(exact)return exact;
     const estimated=results.find(p=>p?.precision==='estimada');
-    return estimated||{...reference,precision:'aproximada'};
+    return estimated||{...reference,precision:'aproximada',source:'street-reference'};
   }
   function stopFromCandidate(c,coordinate,fallback) {
     const addr=c.address||c.raw||fallback;
@@ -529,7 +627,7 @@
       city:c.city||area().city,uf:c.uf||area().uf,precision:coordinate.precision,
       road:c.road||parseAddress(addr).road,district:c.district||'',
       propertyLat:coordinate.lat,propertyLon:coordinate.lon,navLat:coordinate.lat,navLon:coordinate.lon,
-      locationChecked:false,accessConfirmed:false};
+      locationChecked:false,accessConfirmed:false,locationSource:coordinate.source||''};
   }
 
   ui.form.addEventListener('submit', async event => {
@@ -585,36 +683,176 @@
     textStatus('Digite o nome da rua e o número para começar.');
   });
 
+  // ---- Navegação por abas. O mapa só é criado quando sua aba fica visível. ----
+  const TAB_LABELS = { entregas:'Minhas entregas', mapa:'Mapa da rota', resumo:'Resumo da rota' };
+  function openTab(name, { focusTab = false } = {}) {
+    if (!Object.hasOwn(TAB_LABELS, name)) return;
+    activeTab = name;
+    ui.tabs.forEach(button => {
+      const selected = button.dataset.tab === name;
+      button.classList.toggle('active', selected);
+      button.setAttribute('aria-selected', String(selected));
+      button.tabIndex = selected ? 0 : -1;
+      if (selected && focusTab) button.focus();
+    });
+    ui.panels.forEach(panel => { panel.hidden = panel.id !== `panel-${name}`; });
+    ui.activeTabTitle.textContent = TAB_LABELS[name];
+    if (name === 'mapa') {
+      // Sem container visível, MapLibre pode calcular o tamanho errado (mapa branco).
+      requestAnimationFrame(() => {
+        if (!mapInitialized) initMap();
+        else {
+          map?.resize();
+          if (mapReady) { fitMap(); if (focusedStopId) openMapCard(focusedStopId); }
+        }
+      });
+    }
+    window.scrollTo({ top: 0, behavior: 'instant' });
+  }
+  ui.tabs.forEach((button, index) => {
+    button.addEventListener('click', () => openTab(button.dataset.tab));
+    button.addEventListener('keydown', event => {
+      if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+      event.preventDefault();
+      let next = index;
+      if (event.key === 'Home') next = 0;
+      else if (event.key === 'End') next = ui.tabs.length - 1;
+      else next = (index + (event.key === 'ArrowRight' ? 1 : -1) + ui.tabs.length) % ui.tabs.length;
+      openTab(ui.tabs[next].dataset.tab, { focusTab:true });
+    });
+  });
+  ui.openMap.addEventListener('click', () => openTab('mapa'));
+  ui.backDeliveries.addEventListener('click', () => openTab('entregas'));
+
+  // ---- Edição reutilizada pela lista e pelo cartão do mapa. ----
+  function editStop(id) {
+    const stop = stops.find(p => p.id === id);
+    if (!stop) return;
+    editingId = id;
+    selected = null;
+    ui.input.value = stop.endereco;
+    ui.add.textContent = '✓ Salvar edição';
+    ui.cancelEdit.classList.remove('hidden');
+    openTab('entregas');
+    textStatus('Edite o endereço, escolha a sugestão correta e clique em Salvar edição.');
+    inputChange();
+    requestAnimationFrame(() => {
+      ui.input.scrollIntoView({ behavior:'smooth', block:'center' });
+      ui.input.focus();
+    });
+  }
+  function toggleDone(id) {
+    const stop = stops.find(p => p.id === id);
+    if (!stop) return;
+    const hadPlan = routeValid();
+    stop.concluida = !stop.concluida;
+    if (!started || !hadPlan) invalidate();
+    else { planned.signature = signature(); activeArrivalId = null; }
+    ui.arrived.classList.add('hidden');
+    save(); drawAll();
+  }
+
+  // ---- Cartão flutuante de pino e agrupamento de localizações sobrepostas. ----
+  function closeMapCard() {
+    focusedStopId = null;
+    focusedGroupKey = null;
+    ui.mapFloat.classList.add('hidden');
+    ui.mapHint.classList.remove('hidden');
+    markers.forEach(item => item.element.classList.remove('is-selected'));
+  }
+  function selectPinMarker(stopId, key = null) {
+    markers.forEach(item => item.element.classList.toggle('is-selected',
+      key ? item.key === key : item.stopId === stopId));
+  }
+  function openMapCard(id, { fly = false } = {}) {
+    const stop = stops.find(item => item.id === id);
+    if (!stop) { closeMapCard(); return; }
+    focusedStopId = id;
+    focusedGroupKey = null;
+    const index = stops.findIndex(item => item.id === id);
+    ui.mapFloatLabel.textContent = `PARADA ${String(index+1).padStart(2,'0')}`;
+    ui.mapFloatStatus.textContent = stop.concluida ? 'Concluída' : 'Pendente';
+    ui.mapFloatAddress.textContent = stop.endereco;
+    const precision = stop.precision === 'exata' ? 'Número identificado' : stop.precision === 'estimada' ?
+      'Número estimado: confira ao chegar' : 'Ponto aproximado da rua';
+    ui.mapFloatDetail.textContent = precision;
+    ui.mapFloatNavigate.href = locationURL(stop);
+    ui.mapFloatDone.textContent = stop.concluida ? '↶ Desfazer' : '✓ Entregue';
+    ui.mapFloatDone.onclick = () => toggleDone(id);
+    ui.mapFloatEdit.onclick = () => editStop(id);
+    ui.mapFloatChoices.classList.add('hidden');
+    ui.mapFloatChoices.replaceChildren();
+    ui.mapFloatActions.classList.remove('hidden');
+    ui.mapFloat.classList.remove('hidden');
+    ui.mapHint.classList.add('hidden');
+    selectPinMarker(id);
+    if (fly && mapReady) map.easeTo({ center:[stop.lon,stop.lat], zoom:Math.max(15, map.getZoom()),duration:420 });
+  }
+  function openMapGroup(group, key) {
+    focusedStopId = null;
+    focusedGroupKey = key;
+    ui.mapFloatLabel.textContent = 'PONTO COMPARTILHADO';
+    ui.mapFloatStatus.textContent = `${group.length} entregas`;
+    ui.mapFloatAddress.textContent = `${group.length} endereços neste ponto`;
+    ui.mapFloatDetail.textContent = 'A base de mapas não distingue os números. Escolha um endereço para navegar pelo texto completo.';
+    ui.mapFloatChoices.replaceChildren();
+    group.forEach(stop => {
+      const item = document.createElement('button');
+      item.type = 'button';
+      item.textContent = stop.endereco;
+      item.addEventListener('click', () => openMapCard(stop.id));
+      ui.mapFloatChoices.appendChild(item);
+    });
+    ui.mapFloatChoices.classList.remove('hidden');
+    ui.mapFloatActions.classList.add('hidden');
+    ui.mapFloat.classList.remove('hidden');
+    ui.mapHint.classList.add('hidden');
+    selectPinMarker(null, key);
+  }
+  ui.mapFloatClose.addEventListener('click', closeMapCard);
+
   // ---- Map. Map errors must never stop address entry. ----
   function initMap() {
-    if (!window.maplibregl) { ui.mapPlaceholder.classList.remove('hidden'); ui.mapStatus.textContent = 'Mapa temporariamente indisponível.'; return; }
+    if (mapInitialized) return;
+    if (!window.maplibregl) {
+      ui.mapPlaceholder.classList.remove('hidden');
+      ui.mapStatus.textContent = 'Mapa temporariamente indisponível.';
+      return;
+    }
     try {
-      map = new maplibregl.Map({ container: ui.map, style: CFG.mapStyle, center: [origin.lon, origin.lat], zoom: 12.8, attributionControl: true });
+      map = new maplibregl.Map({ container: ui.map, style: CFG.mapStyle,
+        center: [origin.lon, origin.lat], zoom: 12.8, attributionControl: true });
+      mapInitialized = true;
       map.addControl(new maplibregl.NavigationControl({ showCompass:false }), 'bottom-right');
       map.on('load', () => {
         mapReady = true;
-        map.addSource('route-line', { type:'geojson', data: {type:'FeatureCollection', features:[]} });
-        map.addLayer({ id:'route-stroke', source:'route-line', type:'line', layout:{'line-cap':'round','line-join':'round'}, paint:{'line-color':'#278e69','line-width':5,'line-opacity':.9} });
+        map.resize();
+        map.addSource('route-line', { type:'geojson', data:{ type:'FeatureCollection',features:[] } });
+        map.addLayer({id:'route-stroke',source:'route-line',type:'line',layout:{'line-cap':'round','line-join':'round'},paint:{'line-color':'#278e69','line-width':5,'line-opacity':.9}});
         drawMap();
+        fitMap();
       });
+      map.on('click', () => closeMapCard());
       map.on('error', event => {
         console.warn('Mapa:', event.error);
-        if (!mapReady) {
-          ui.mapStatus.textContent = 'Mapa indisponível no momento. O cadastro continua funcionando.';
-          ui.mapPlaceholder.classList.remove('hidden');
-        }
+        if (!mapReady) { ui.mapStatus.textContent='Mapa temporariamente indisponível.';ui.mapPlaceholder.classList.remove('hidden'); }
       });
-    } catch (error) { console.warn('Mapa indisponível:', error); ui.mapPlaceholder.classList.remove('hidden'); }
+    } catch (error) {
+      console.warn('Mapa indisponível:',error);
+      mapInitialized = false;
+      ui.mapPlaceholder.classList.remove('hidden');
+    }
   }
-  function createMarker(label, type, lng, lat, popupText) {
-    const element = document.createElement('div');
+  function createMarker(label, type, lng, lat, onClick, stopId = null, key = null) {
+    const element = document.createElement('button');
+    element.type = 'button';
     element.className = `map-pin ${type}`;
-    element.textContent = label;
-    const popup = document.createElement('div');
-    const title = document.createElement('strong'); title.textContent = popupText;
-    popup.appendChild(title);
-    const marker = new maplibregl.Marker({ element }).setLngLat([lng,lat]).setPopup(new maplibregl.Popup({offset:17}).setDOMContent(popup)).addTo(map);
-    markers.push(marker);
+    element.setAttribute('aria-label', 'Abrir detalhes: ' + label);
+    const text = document.createElement('span'); text.className='pin-label';text.textContent=label;
+    element.appendChild(text);
+    element.addEventListener('click', event => { event.stopPropagation(); onClick(); });
+    const marker = new maplibregl.Marker({ element }).setLngLat([lng,lat]).addTo(map);
+    markers.push({marker,element,stopId,key});
   }
   function fitMap() {
     if (!mapReady) return;
@@ -625,16 +863,64 @@
     points.slice(1).forEach(p=>bounds.extend(p));
     map.fitBounds(bounds, {padding:45,maxZoom:15,duration:450});
   }
+  function duplicateLocations() {
+    const byPoint = new Map();
+    stops.forEach(stop => {
+      if (stop.concluida || stop.precision !== 'aproximada') return;
+      // cerca de 3 metros: referência genérica compartilhada, não imóvel confirmado.
+      const key = `${Number(stop.lat).toFixed(5)}|${Number(stop.lon).toFixed(5)}`;
+      const group = byPoint.get(key) || [];
+      group.push(stop);
+      byPoint.set(key, group);
+    });
+    return [...byPoint.values()].filter(group => group.length > 1 &&
+      group.some(p => String(p.number || '')) && new Set(group.map(p => p.number)).size > 1);
+  }
+  function coincidentStopIds() {
+    return new Set(duplicateLocations().flatMap(group => group.map(p => p.id)));
+  }
+
   function drawMap() {
     if (!mapReady) return;
-    markers.forEach(m=>m.remove()); markers=[];
-    createMarker('⌂','origin',origin.lon,origin.lat,`Origem: ${origin.endereco}`);
+    markers.forEach(item=>item.marker.remove());
+    markers=[];
+    createMarker('⌂','origin',origin.lon,origin.lat,()=> {
+      focusedStopId = null;
+      ui.mapFloatLabel.textContent = 'PONTO DE PARTIDA';
+      ui.mapFloatStatus.textContent = 'Origem';
+      ui.mapFloatAddress.textContent = origin.endereco;
+      ui.mapFloatDetail.textContent = 'A rota é calculada a partir desta localização.';
+      ui.mapFloatChoices.classList.add('hidden');
+      ui.mapFloatActions.classList.add('hidden');
+      ui.mapFloat.classList.remove('hidden');
+      ui.mapHint.classList.add('hidden');
+    });
     const next = started ? stops.find(p=>!p.concluida) : null;
-    stops.forEach((p,i)=>createMarker(String(i+1),p.concluida ? 'done' : next?.id === p.id ? 'next' : '',p.lon,p.lat,p.endereco));
+    const groups = new Map();
+    stops.forEach(stop => {
+      // Agrupar coordenadas idênticas evita que um pino esconda outro sem inventar posições.
+      const key = `${stop.lat.toFixed(5)}|${stop.lon.toFixed(5)}`;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(stop);
+    });
+    groups.forEach((group,key) => {
+      const p = group[0];
+      if (group.length > 1) {
+        createMarker(String(group.length),'group',p.lon,p.lat,()=>openMapGroup(group,key),null,key);
+      } else {
+        const i = stops.findIndex(stop=>stop.id===p.id);
+        createMarker(String(i+1), p.concluida?'done':next?.id===p.id?'next':p.precision!=='exata'?'uncertain':'',
+          p.lon,p.lat,()=>openMapCard(p.id),p.id);
+      }
+    });
     const line = routeValid() ? planned.geometry : null;
-    const feature = line && line.length > 1 ? { type:'Feature',properties:{},geometry:{type:'LineString',coordinates:line} } : null;
+    const feature = line && line.length > 1 ? {type:'Feature',properties:{},geometry:{type:'LineString',coordinates:line}} : null;
     map.getSource('route-line')?.setData({type:'FeatureCollection',features:feature?[feature]:[]});
     map.setPaintProperty('route-stroke','line-dasharray',planned?.approximate?[1.4,1.4]:[1,0]);
+    if (focusedStopId) openMapCard(focusedStopId);
+    else if (focusedGroupKey && groups.has(focusedGroupKey) && groups.get(focusedGroupKey).length>1)
+      openMapGroup(groups.get(focusedGroupKey),focusedGroupKey);
+    else if (focusedGroupKey) closeMapCard();
     if (gpsFix) displayGps();
   }
   ui.fit.addEventListener('click', fitMap);
@@ -670,7 +956,7 @@
     if (!window.isSecureContext) { showToast('Para usar GPS, abra por HTTPS ou localhost.'); return; }
     ui.gps.textContent = '◎ Ligando GPS...';
     gpsWatchId = navigator.geolocation.watchPosition(position => {
-      gpsFix = {lat:position.coords.latitude,lon:position.coords.longitude,accuracy:position.coords.accuracy};
+      gpsFix = {lat:position.coords.latitude,lon:position.coords.longitude,accuracy:Number.isFinite(position.coords.accuracy) ? position.coords.accuracy : Infinity};
       displayGps();
     }, error => {
       showToast(error.code===1?'Autorize a localização no navegador.':'Não conseguimos obter seu GPS.');
@@ -841,42 +1127,43 @@
     ui.list.replaceChildren();
     if(!stops.length)ui.list.append(el('div','empty','Nenhuma entrega cadastrada. Digite uma rua acima para começar.'));
     const next=started?stops.find(p=>!p.concluida):null;
+    const overlapIds=coincidentStopIds();
     stops.forEach((stop,index)=>{
       const card=el('article',`stop${stop.concluida?' completed':''}${next?.id===stop.id?' primary':''}`);
       const num=el('span','stop-index',String(index+1));
       const info=el('div','stop-info');
       info.append(el('strong',stop.concluida?'done':'',stop.endereco));
-      info.append(el('small','',`${stop.concluida?'Concluída':'Pendente'} · ${stop.precision==='exata'?'Número identificado no mapa':stop.precision==='estimada'?'Número estimado na rua':'Localização aproximada da rua'}`));
+      info.append(el('small','',`${stop.concluida?'Concluída':'Pendente'} · ${stop.precision==='exata'?'Número identificado no mapa':stop.precision==='estimada'?'Número estimado entre endereços mapeados':'Localização aproximada da rua'}`));
+      if(overlapIds.has(stop.id)) info.append(el('small','location-warning','⚠ Número não mapeado: outras entregas usam este mesmo ponto aproximado. Use Navegar para pesquisar o número completo.'));
       const actions=el('div','stop-actions');
       const link=el('a','', '↗ Navegar');link.href=locationURL(stop);link.target='_blank';link.rel='noopener noreferrer';
-      const mark=buildButton(stop.concluida?'↶ Desfazer':'✓ Entregue',()=>{
-        const hadPlan = routeValid();
-        stop.concluida=!stop.concluida;
-        if(!started || !hadPlan) invalidate();
-        else { planned.signature=signature(); activeArrivalId=null; }
-        save();drawAll();
-      },'done-btn');
-      const edit=buildButton('✎ Editar',()=>{
-        editingId=stop.id;selected=null;ui.input.value=stop.endereco;ui.add.textContent='✓ Salvar edição';ui.cancelEdit.classList.remove('hidden');
-        ui.input.focus();ui.input.scrollIntoView({behavior:'smooth',block:'center'});
-        textStatus('Edite o endereço, escolha a sugestão correta e clique em Salvar edição.');
-        inputChange();
-      });
+      const mark=buildButton(stop.concluida?'↶ Desfazer':'✓ Entregue',()=>toggleDone(stop.id),'done-btn');
+      const edit=buildButton('✎ Editar',()=>editStop(stop.id));
+      const mapJump=buildButton('⌖ Mapa',()=>{
+        focusedStopId=stop.id;
+        openTab('mapa');
+        // O cartão aparece mesmo antes de o mapa terminar de carregar.
+        requestAnimationFrame(()=>openMapCard(stop.id,{fly:true}));
+      },'map-jump');
       const remove=buildButton('✕',()=>{
         if(!confirm(`Remover a entrega: ${stop.endereco}?`))return;
         stops=stops.filter(x=>x.id!==stop.id);if(editingId===stop.id)editingId=null;
         invalidate();save();drawAll();
       },'remove','Excluir entrega');
-      actions.append(link,mark,edit,remove);
+      actions.append(mapJump,link,mark,edit,remove);
       card.append(num,info,actions);ui.list.appendChild(card);
     });
   }
   function drawStats() {
     const total=stops.length, done=stops.filter(p=>p.concluida).length,pending=total-done;
     ui.heroCount.textContent=String(pending);
+    ui.navCount.textContent=String(total);
+    ui.topbarProgress.textContent=total ? `${done} de ${total} entregas concluídas` : 'Seu planejamento começa aqui';
     ui.heroKm.textContent=routeValid()?`${planned.km.toFixed(1).replace('.',',')} km`:'—';
     ui.heroMin.textContent=routeValid()?`${planned.mins} min`:'—';
-    ui.heroNotice.textContent=routeValid()?(planned.approximate?'Rota pronta · estimativas aproximadas.':'Rota pronta para iniciar.') :total?'Você adicionou endereços. Clique em Otimizar rota quando terminar.':'Adicione suas entregas para começar.';
+    const overlapCount=duplicateLocations().flat().length;
+    ui.heroNotice.textContent=overlapCount ? `${overlapCount} entregas compartilham localização aproximada: atenção aos números antes de sair.` :
+      routeValid()?(planned.approximate?'Rota pronta · alguns pontos são estimados.':'Rota pronta para iniciar.') :total?'Você adicionou endereços. Clique em Otimizar rota quando terminar.':'Adicione suas entregas para começar.';
     ui.optimize.disabled=optimizing||!pending;
     ui.start.disabled=optimizing||!routeValid();
     ui.count.textContent=`${total} ${total===1?'parada':'paradas'}`;
@@ -890,11 +1177,7 @@
     ui.next.classList.toggle('hidden',!target);
     if(target){ui.nextNumber.textContent=String(stops.indexOf(target)+1);ui.nextAddress.textContent=target.endereco;
       ui.nextNavigate.href=locationURL(target);ui.nextProgress.textContent=`${done} de ${total} concluídas`;
-      ui.nextDone.onclick=()=>{
-        const hadPlan = routeValid();
-        target.concluida=true; if(hadPlan) planned.signature=signature(); else invalidate();
-        activeArrivalId=null;ui.arrived.classList.add('hidden');save();drawAll();
-      };
+      ui.nextDone.onclick=()=>{ if(!target.concluida) toggleDone(target.id); };
     }else ui.arrived.classList.add('hidden');
   }
   function drawAll(){renderStops();drawStats();drawMap();}
@@ -906,9 +1189,9 @@
   ui.reset.addEventListener('click',()=>{
     if(!stops.length)return;
     if(!confirm('Apagar todas as entregas e iniciar uma rota nova?'))return;
-    stops=[];editingId=null;selected=null;ui.input.value='';invalidate();save();drawAll();showToast('Lista apagada.');
+    stops=[];editingId=null;selected=null;ui.input.value='';closeMapCard();invalidate();save();drawAll();showToast('Lista apagada.');
   });
 
   // ---- Initialize ----
-  drawStats();renderStops();initMap();
+  drawAll(); // A aba inicial é Entregas; o mapa será carregado ao acessar sua aba.
 })();
