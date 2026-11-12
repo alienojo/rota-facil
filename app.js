@@ -1,13 +1,14 @@
 (() => {
   'use strict';
 
-  // RotaFácil V10 — busca por número + chegada pela rua + fallback confiável. Sem cadastros ou chaves exigidas do motorista.
+  // RotaFácil V11 — imóvel mapeado, interpolação prudente e navegação separada do pino.
   // Photon oferece busca conforme digita; ViaCEP complementa rua, bairro e CEP.
   // Para escala comercial, hospede um serviço de geocodificação com SLA/proxy próprio.
   const CFG = Object.freeze({
     photon: 'https://photon.komoot.io', viaCep: 'https://viacep.com.br/ws',
     osrm: 'https://router.project-osrm.org',
     overpass: 'https://overpass-api.de/api/interpreter',
+    addressLookupRadius: 1500, addressLookupTimeout: 6500,
     mapStyle: 'https://tiles.openfreemap.org/styles/positron',
     debounceMs: 480, timeoutMs: 9000, maxStopsForRoadMatrix: 23, maxAddressChecks: 6,
     defaultOrigin: { endereco: 'Centro de São José dos Campos, SP', lat: -23.1794, lon: -45.8869, personalizado: false }
@@ -52,12 +53,15 @@
       urgent: Boolean(item.urgent || item.urgente),
       notes: String(item.notes || item.notas || '').slice(0, 200),
       road: String(item.road || parseAddress(item.endereco).road || ''), district: String(item.district || ''),
-      propertyLat: validPoint({lat:item.propertyLat,lon:item.propertyLon}) ? Number(item.propertyLat) : null,
-      propertyLon: validPoint({lat:item.propertyLat,lon:item.propertyLon}) ? Number(item.propertyLon) : null,
+      propertyLat: validPoint({lat:item.propertyLat,lon:item.propertyLon}) ? Number(item.propertyLat) : Number(item.lat),
+      propertyLon: validPoint({lat:item.propertyLat,lon:item.propertyLon}) ? Number(item.propertyLon) : Number(item.lon),
+      navLat: validPoint({lat:item.navLat,lon:item.navLon}) ? Number(item.navLat) : Number(item.lat),
+      navLon: validPoint({lat:item.navLat,lon:item.navLon}) ? Number(item.navLon) : Number(item.lon),
       locationChecked: Boolean(item.locationChecked), accessConfirmed: Boolean(item.accessConfirmed)
     };
   }
   let stops = (Array.isArray(getJSON(STORE.stops, [])) ? getJSON(STORE.stops, []) : []).map(cleanedStop).filter(Boolean);
+  stops.forEach(stop => { if (stop.precision === 'exata' && validPoint({lat:stop.propertyLat,lon:stop.propertyLon})) { stop.lat=stop.propertyLat; stop.lon=stop.propertyLon; } });
   let origin = getJSON(STORE.origin, { ...CFG.defaultOrigin });
   if (!validPoint(origin)) origin = { ...CFG.defaultOrigin };
   origin = { ...origin, lat: Number(origin.lat), lon: Number(origin.lon) };
@@ -82,7 +86,7 @@
   let map = null, mapReady = false, gpsMarker = null, gpsAccuracyMarker = null, markers = [];
   let gpsWatchId = null, gpsVisualTimer = null, gpsFix = null, activeArrivalId = null;
 
-  function signature() { return JSON.stringify({ origin: [origin.lat, origin.lon], stops: stops.map(p => [p.id, p.lat, p.lon, p.concluida]) }); }
+  function signature() { return JSON.stringify({ origin: [origin.lat, origin.lon], stops: stops.map(p => [p.id, p.lat, p.lon, p.navLat, p.navLon, p.concluida]) }); }
   function routeValid() { return planned && planned.signature === signature() && Array.isArray(planned.order) && planned.order.length > 0; }
   if (!routeValid()) { planned = null; started = false; }
   function save() {
@@ -112,7 +116,14 @@
   const norm = s => String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
   const normalizeRoad = s => norm(s).replace(/^(rua|avenida|av|travessa|alameda|estrada|rodovia|praca)\s+/, '');
   const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
-  const locationURL = p => `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(`${p.lat},${p.lon}`)}&travelmode=driving`;
+  // Ao navegar para uma casa não mapeada, o Google Maps pode resolver o número
+  // pelo próprio banco de dados. Não repassar o centro da rua como se fosse a residência.
+  const locationURL = p => {
+    const dest = p.precision === 'exata'
+      ? `${p.navLat ?? p.lat},${p.navLon ?? p.lon}`
+      : `${p.road || p.endereco}, ${p.number || ''}, ${p.district || ''}, ${p.city || ''}, ${p.uf || ''}, Brasil`;
+    return `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(dest)}&travelmode=driving`;
+  };
 
   // ---- Address parsing. Never interpret 'Rua 7 de Setembro' as house number 7. ----
   function parseAddress(text) {
@@ -399,49 +410,128 @@
   });
   for (const input of [ui.city, ui.state]) input.addEventListener('change', () => { selected = null; inputChange(); save(); });
 
-  // ---- Localizar: preservar coordenadas de sugestão selecionada sem repetir uma requisição frágil. ----
-  async function resolveCoordinates(candidate, userArea, signal) {
-    const parsed = parseAddress(candidate.address || ui.input.value);
-    const house = candidate.typedNumber || candidate.number || parsed.number;
-    const road = candidate.road || parsed.road;
-    const city = candidate.city || userArea.city;
-    const uf = /^[A-Z]{2}$/.test(candidate.uf || '') ? candidate.uf : userArea.uf;
-    const originalPoint = validPoint(candidate) ? { lat: Number(candidate.lat), lon: Number(candidate.lon) } : null;
-    if (candidate.precision === 'exata' && originalPoint) return { ...originalPoint, precision: 'exata' };
-    // Se a sugestão já trouxe coordenadas, salvar diretamente evita consultas
-    // adicionais que podem demorar ou falhar. Número desconhecido segue aproximado.
-    if (originalPoint) return { ...originalPoint, precision: 'aproximada' };
-    // Só consultar outra vez quando a sugestão (ex.: ViaCEP) não tiver coordenadas.
-    if (house) {
-      try {
-        const params = new URLSearchParams({ street: road, housenumber: String(house), city, countrycode: 'BR', limit: '5' });
-        const res = await photonJSON(`${CFG.photon}/structured?${params}`, signal);
-        for (const feature of res.features || []) {
-          const props = feature.properties || {};
-          const found = featureToCandidate(feature);
-          if (found && norm(props.housenumber) === norm(house) && normalizeRoad(found.road) === normalizeRoad(road) && (!found.city || norm(found.city) === norm(city))) {
-            return { lat: found.lat, lon: found.lon, precision: 'exata' };
-          }
-        }
-      } catch (error) { if (signal?.aborted) throw error; console.warn('Consulta do número indisponível:', error); }
+  // ---- Geocodificação por número antes de aceitar o centro da rua. ----
+  // "Exata" indica que um cadastro identificou rua + número, não que conhecemos a porta.
+  // "estimada" usa duas numerações da mesma rua e mesma paridade.
+  // "aproximada" significa que só conhecemos uma posição genérica da rua.
+  const addressCache = new Map();
+  function hasMatchingAddress(candidate,road,house,city) {
+    return validPoint(candidate) && normalizeRoad(candidate.road) === normalizeRoad(road) &&
+      norm(candidate.house) === norm(house) && (!candidate.city || !city || norm(candidate.city) === norm(city));
+  }
+  const houseDigits = value => { const m=String(value||'').trim().match(/^(\d+)(?:[a-z])?$/i); return m?Number(m[1]):null; };
+  const escapeOverpass = str => String(str).replace(/\\/g,'\\\\').replace(/"/g,'\\"');
+  const escapePattern = str => String(str).replace(/[.*+?^${}()|[\]\\]/g,'\\$&');
+
+  function getOSMAddressMatches(elements,road,house,point) {
+    const relevant=(Array.isArray(elements)?elements:[]).filter(e=>
+      normalizeRoad(e.tags?.['addr:street'])===normalizeRoad(road))
+      .map(e=>({house:String(e.tags?.['addr:housenumber']||''),
+        lat:Number(e.lat??e.center?.lat),lon:Number(e.lon??e.center?.lon),
+        city:String(e.tags?.['addr:city']||''),postcode:String(e.tags?.['addr:postcode']||''),
+        tags:e.tags||{}}))
+      .filter(validPoint)
+      .filter(p=>!point||meters(p,point)<=CFG.addressLookupRadius+150);
+    const direct=relevant.filter(p=>norm(p.house)===norm(house)).sort((a,b)=>meters(a,point)-meters(b,point));
+    if (direct.length) return {...direct[0],precision:'exata'};
+
+    const target=houseDigits(house);
+    if (!Number.isFinite(target)) return null;
+    // Não interpolar casas em lados opostos da via: usar a mesma paridade.
+    const sameSide=relevant.filter(p=>houseDigits(p.house)!==null && houseDigits(p.house)%2===target%2)
+      .sort((a,b)=>houseDigits(a.house)-houseDigits(b.house));
+    const estimates=[];
+    for (let i=0;i<sameSide.length-1;i++) {
+      const a=sameSide[i],b=sameSide[i+1];
+      const first=houseDigits(a.house),last=houseDigits(b.house);
+      if (first>=target||last<=target||last-first>40||meters(a,b)>180) continue;
+      const t=(target-first)/(last-first);
+      estimates.push({lat:a.lat+(b.lat-a.lat)*t,lon:a.lon+(b.lon-a.lon)*t,
+        precision:'estimada',interval:last-first,distance:meters(a,b),
+        near:Math.min(meters(a,point),meters(b,point))});
     }
-    if (originalPoint) return { ...originalPoint, precision: 'aproximada' };
-    const q = { road, number: house, extra: candidate.district || '', raw: road };
-    const matches = await getPhotonCandidates(q, { city, uf }, signal);
-    const suitable = matches.sort((a,b) => score(b,q,{city,uf})-score(a,q,{city,uf})).find(c =>
-      normalizeRoad(c.road) === normalizeRoad(road) && (!c.city || norm(c.city) === norm(city)) &&
-      (!c.house || norm(c.house)===norm(house)));
-    if (!suitable) throw new Error('Encontrei a rua no cadastro, mas não consegui posicioná-la no mapa. Tente selecionar outra sugestão.');
-    return { lat: suitable.lat, lon: suitable.lon, precision: 'aproximada' };
+    estimates.sort((a,b)=>a.interval-b.interval||a.distance-b.distance||a.near-b.near);
+    return estimates[0]||null;
   }
-  function stopFromCandidate(c, coordinate, fallback) {
-    const addr = c.address || c.raw || fallback;
-    return { endereco: addr, lat: coordinate.lat, lon: coordinate.lon,
-      number: c.typedNumber || c.number || parseAddress(addr).number || '',
-      city: c.city || area().city, uf: c.uf || area().uf, precision: coordinate.precision,
-      road: c.road || parseAddress(addr).road, district: c.district || '',
-      propertyLat:coordinate.lat,propertyLon:coordinate.lon,locationChecked:false,accessConfirmed:false };
+
+  async function queryOSMAddress(road,house,approximate,signal) {
+    if (!validPoint(approximate)) return null;
+    const key=`${norm(road)}|${norm(house)}|${approximate.lat.toFixed(3)}|${approximate.lon.toFixed(3)}`;
+    if (addressCache.has(key)) return addressCache.get(key);
+    const core=normalizeRoad(road);
+    if (core.length<3) return null;
+    const regex=escapeOverpass(escapePattern(core));
+    const num=escapeOverpass(house);
+    const radius=CFG.addressLookupRadius;
+    // uma única consulta traz número exato e âncoras da mesma rua para interpolação
+    const q=`[out:json][timeout:6];(nwr(around:${radius},${approximate.lat},${approximate.lon})["addr:housenumber"="${num}"];nwr(around:${radius},${approximate.lat},${approximate.lon})["addr:street"~"${regex}",i]["addr:housenumber"];);out center 160;`;
+    const data=await getJSONRemote(`${CFG.overpass}?data=${encodeURIComponent(q)}`,
+      {signal,timeout:CFG.addressLookupTimeout});
+    const hit=getOSMAddressMatches(data.elements,road,house,approximate);
+    addressCache.set(key,hit);
+    if(addressCache.size>45)addressCache.delete(addressCache.keys().next().value);
+    return hit;
   }
+
+  async function photonExactHouse(road,house,city,uf,signal) {
+    const params=new URLSearchParams({street:road,housenumber:String(house),city,
+      countrycode:'BR',limit:'8',lat:String(origin.lat),lon:String(origin.lon)});
+    const data=await photonJSON(`${CFG.photon}/structured?${params}`,signal);
+    const features=(data.features||[]).map(featureToCandidate).filter(Boolean);
+    return features.filter(c=>hasMatchingAddress(c,road,house,city))
+      .sort((a,b)=>meters(a,origin)-meters(b,origin))[0]||null;
+  }
+
+  async function resolveCoordinates(candidate,userArea,signal) {
+    const parsed=parseAddress(candidate.address||ui.input.value);
+    const house=String(candidate.typedNumber||candidate.number||candidate.house||parsed.number||'').trim();
+    const road=String(candidate.road||parsed.road||'').trim();
+    const city=String(candidate.city||userArea.city).trim();
+    const uf=/^[A-Z]{2}$/.test(candidate.uf||'')?candidate.uf:userArea.uf;
+    const original=validPoint(candidate)?{lat:Number(candidate.lat),lon:Number(candidate.lon)}:null;
+    if (!road)throw new Error('Digite o nome da rua.');
+
+    // Se o próprio resultado é um imóvel numerado, utilizar o ponto do imóvel.
+    if(house && hasMatchingAddress(candidate,road,house,city)) {
+      return {...original,precision:'exata'};
+    }
+
+    let reference=original;
+    if(!reference){
+      const q={road,number:house,extra:candidate.district||''};
+      const matches=await getPhotonCandidates(q,{city,uf},signal);
+      const suitable=matches.filter(c=>normalizeRoad(c.road)===normalizeRoad(road) &&
+        (!c.city||norm(c.city)===norm(city))).sort((a,b)=>score(b,q,{city,uf})-score(a,q,{city,uf}))[0];
+      if(!suitable)throw new Error('Não conseguimos posicionar essa rua. Escolha outra sugestão.');
+      reference={lat:suitable.lat,lon:suitable.lon};
+      if(house && hasMatchingAddress(suitable,road,house,city))return {...reference,precision:'exata'};
+    }
+    if(!house)return {...reference,precision:'aproximada'};
+
+    // Buscar casa mapeada antes do fallback para o ponto central da rua.
+    // As duas fontes são independentes: uma falha não impede o cadastro.
+    const jobs=[photonExactHouse(road,house,city,uf,signal).then(p=>
+      p?{lat:p.lat,lon:p.lon,precision:'exata'}:null).catch(error=>{
+        if(signal?.aborted)throw error; console.warn('Endereço por número indisponível:',error);return null;
+      }), queryOSMAddress(road,house,reference,signal).catch(error=>{
+        if(signal?.aborted)throw error;console.warn('Imóveis OSM indisponíveis:',error);return null;
+      })];
+    const results=await Promise.all(jobs);
+    const exact=results.find(p=>p?.precision==='exata');
+    if(exact)return exact;
+    const estimated=results.find(p=>p?.precision==='estimada');
+    return estimated||{...reference,precision:'aproximada'};
+  }
+  function stopFromCandidate(c,coordinate,fallback) {
+    const addr=c.address||c.raw||fallback;
+    return {endereco:addr,lat:coordinate.lat,lon:coordinate.lon,
+      number:c.typedNumber||c.number||c.house||parseAddress(addr).number||'',
+      city:c.city||area().city,uf:c.uf||area().uf,precision:coordinate.precision,
+      road:c.road||parseAddress(addr).road,district:c.district||'',
+      propertyLat:coordinate.lat,propertyLon:coordinate.lon,navLat:coordinate.lat,navLon:coordinate.lon,
+      locationChecked:false,accessConfirmed:false};
+  }
+
   ui.form.addEventListener('submit', async event => {
     event.preventDefault();
     if (ui.add.disabled) return;
@@ -457,7 +547,7 @@
     const ctrl = new AbortController();
     setBusy(ui.add, true, 'Localizando...');
     hideSuggestions();
-    textStatus('Localizando a rua no mapa...');
+    textStatus('Procurando o número da casa e a localização da rua...');
     try {
       const coord = await resolveCoordinates(candidate, userArea, ctrl.signal);
       if (ui.input.value.trim() !== typed) throw new Error('O endereço foi alterado. Confirme novamente antes de salvar.');
@@ -478,7 +568,7 @@
       searchSeq++; searchController?.abort();
       invalidate(); drawAll(); save();
       textStatus(wasEditing ? 'Endereço atualizado na lista.' : 'Entrega adicionada à lista.');
-      if (coord.precision !== 'exata') showToast('Entrega salva com posição aproximada da rua.');
+      if (coord.precision !== 'exata') showToast(coord.precision==='estimada'?'Entrega adicionada com posição estimada pelo número.':'Entrega adicionada com localização aproximada da rua.');
     } catch (error) {
       if (error.name === 'AbortError') textStatus('A busca foi interrompida. Tente novamente.', true);
       else if (error.status || error instanceof TypeError)
@@ -558,7 +648,7 @@
     } else gpsMarker.setLngLat([gpsFix.lon,gpsFix.lat]);
     ui.gpsMessage.textContent = `◎ GPS ativo · precisão aproximada ±${Math.round(gpsFix.accuracy)} m`;
     const target = stops.find(p=>!p.concluida);
-    if (started && target && target.accessConfirmed === true && gpsFix.accuracy <= 10 && meters(gpsFix,target) <= 10) {
+    if (started && target && target.accessConfirmed === true && gpsFix.accuracy <= 10 && meters(gpsFix,navigationPoint(target)) <= 10) {
       if (activeArrivalId !== target.id) {
         activeArrivalId = target.id;
         ui.arrived.textContent = 'Você chegou perto do destino. Confirme a entrega ao finalizar.';
@@ -619,75 +709,39 @@
     },()=>{ui.originStatus.textContent='GPS indisponível. Verifique a permissão.';},{enableHighAccuracy:true,timeout:15000});
   });
 
-  // ---- Inteligência de última milha (sem configuração para o motorista). ----
-  // OSM: procurar endereço com o número EXATO; OSRM: achar a via dirigível que
-  // corresponde ao logradouro. Se não houver dados, preservar a posição aproximada.
-  let overpassUnavailable = false;
-  async function lookupOSMHousesBatch(items) {
-    if (!items.length || overpassUnavailable) return [];
-    // Um único lote por clique evita sobrecarregar a instância pública Overpass.
-    const selectors = items.map(stop => {
-      const house=stop.number.replace(/[^0-9A-Za-z-]/g,'');
-      return `nwr(around:280,${stop.lat},${stop.lon})["addr:housenumber"="${house}"];`;
-    }).join('');
-    const q=`[out:json][timeout:6];(${selectors});out center tags;`;
-    try {
-      const response=await getJSONRemote(`${CFG.overpass}?data=${encodeURIComponent(q)}`,{timeout:6500});
-      return Array.isArray(response.elements) ? response.elements : [];
-    } catch(error) {
-      if ([429,403,503,504].includes(error.status)) overpassUnavailable=true;
-      console.warn('Base de imóveis temporariamente indisponível:',error);
-      return [];
-    }
-  }
-  function exactOSMHouseFor(stop,elements) {
-    const found=elements.filter(node =>
-      norm(node.tags?.['addr:housenumber'])===norm(stop.number) &&
-      normalizeRoad(node.tags?.['addr:street'])===normalizeRoad(stop.road))
-      .map(node=>({lat:Number(node.lat??node.center?.lat),lon:Number(node.lon??node.center?.lon)}))
-      .filter(validPoint)
-      .filter(point=>meters(point,stop)<=280)
-      .sort((a,b)=>meters(a,stop)-meters(b,stop));
-    return found[0]||null;
-  }
+  // ---- Última milha: pino no imóvel; navegação na rua, se identificada. ----
   async function snapToNamedRoad(point,street) {
-    if (!validPoint(point)) return null;
+    if(!validPoint(point)||!street)return null;
     try {
       const url=`${CFG.osrm}/nearest/v1/driving/${point.lon},${point.lat}?number=8`;
       const data=await getJSONRemote(url,{timeout:4200});
-      if (data.code!=='Ok' || !Array.isArray(data.waypoints)) return null;
-      // Sem conferir a rua, o ponto mais próximo poderia cair numa via paralela.
-      const matches=data.waypoints.filter(w => Array.isArray(w.location) &&
-        normalizeRoad(w.name)===normalizeRoad(street) && Number(w.distance)<=110)
+      if(data.code!=='Ok'||!Array.isArray(data.waypoints))return null;
+      const valid=data.waypoints.filter(w=>Array.isArray(w.location)&&
+        normalizeRoad(w.name)===normalizeRoad(street)&&Number(w.distance)<=90)
         .sort((a,b)=>a.distance-b.distance);
-      return matches.length ? {lat:matches[0].location[1],lon:matches[0].location[0]} : null;
-    } catch(error) { console.warn('Encaixe à rua indisponível:',error); return null; }
+      if(!valid.length)return null;
+      return {lat:valid[0].location[1],lon:valid[0].location[0]};
+    }catch(error){console.warn('Ponto viário indisponível:',error);return null;}
   }
   async function improvePendingLocations(list,snapshot) {
-    const eligible=list.filter(stop=>stop.number && stop.road && !stop.locationChecked)
-      .slice(0,CFG.maxAddressChecks);
-    if (!eligible.length) return;
-    const elements=await lookupOSMHousesBatch(eligible);
-    if (routeRevision!==snapshot) return;
-    const updated=await Promise.all(eligible.map(async stop=>{
-      const home=exactOSMHouseFor(stop,elements);
-      const base=home||{lat:stop.propertyLat??stop.lat,lon:stop.propertyLon??stop.lon};
-      const road=await snapToNamedRoad(base,stop.road);
-      return {stop, changes:{
-        ...(home?{propertyLat:home.lat,propertyLon:home.lon,precision:'exata'}:{}),
-        ...(road?{lat:road.lat,lon:road.lon}:{}),
-        // Elegível ao alerta de proximidade só se número identificado E rua correspondente.
-        // Isto NÃO comprova a entrada principal ou o local exato da fachada.
-        locationChecked:true, accessConfirmed:Boolean(road && (home || stop.precision==='exata'))
-      }};
-    }));
-    if (routeRevision!==snapshot) return;
-    for (const {stop,changes} of updated) {
-      const current=stops.find(s=>s.id===stop.id && s.endereco===stop.endereco);
-      if(current) Object.assign(current,changes);
+    const eligible=list.filter(stop=>stop.road&&!stop.locationChecked&&stop.precision!=='aproximada').slice(0,CFG.maxAddressChecks);
+    // limitar solicitações ao serviço público de rotas e não sobrecarregá-lo
+    for(const stop of eligible){
+      if(routeRevision!==snapshot)return;
+      const place={lat:stop.propertyLat??stop.lat,lon:stop.propertyLon??stop.lon};
+      const road=await snapToNamedRoad(place,stop.road);
+      if(routeRevision!==snapshot)return;
+      const current=stops.find(s=>s.id===stop.id);
+      if(!current)continue;
+      current.navLat=road?road.lat:place.lat;
+      current.navLon=road?road.lon:place.lon;
+      current.locationChecked=true;
+      current.accessConfirmed=Boolean(road&&stop.precision==='exata');
+      // Nunca mover a posição lat/lon do pino do imóvel para a rua.
     }
     save();drawAll();
   }
+  const navigationPoint=p=>({lat:p.navLat??p.lat,lon:p.navLon??p.lon});
 
   // ---- Route optimizer: road durations → nearest-neighbor + 2-opt; geographic fallback. ----
   function greedy(points, matrix) {
@@ -748,7 +802,7 @@
     try{
       await improvePendingLocations(pending,snapshot);
       if (snapshot!==routeRevision) return;
-      const points=[origin,...pending];
+      const points=[origin,...pending.map(navigationPoint)];
       let matrix, matrixApproximate=false;
       try { matrix=points.length-1<=CFG.maxStopsForRoadMatrix ? await getRoadMatrix(points) : distanceMatrix(points);matrixApproximate=points.length-1>CFG.maxStopsForRoadMatrix; }
       catch (error){console.warn('Distâncias por ruas indisponíveis:',error);matrix=distanceMatrix(points);matrixApproximate=true;}
@@ -757,17 +811,17 @@
       const ordered=best.map(i=>pending[i-1]);
       let route=null;
       if(ordered.length<=CFG.maxStopsForRoadMatrix) {
-        try{route=await getRoadPolyline([origin,...ordered]);}catch(error){console.warn('Traçado por ruas indisponível:',error);}
+        try{route=await getRoadPolyline([origin,...ordered.map(navigationPoint)]);}catch(error){console.warn('Traçado por ruas indisponível:',error);}
       }
       if(snapshot!==routeRevision) return;
       orderPending(ordered);
-      const pointsOrdered=[origin,...ordered];
+      const pointsOrdered=[origin,...ordered.map(navigationPoint)];
       const approxKm=pointsOrdered.slice(1).reduce((sum,p,i)=>sum+meters(pointsOrdered[i],p),0)*1.25/1000;
       const km=route ? route.distance/1000 : approxKm;
       const mins=route ? Math.ceil(route.duration/60) : Math.ceil(approxKm/28*60);
       const geometry=route ? route.geometry.coordinates : pointsOrdered.map(p=>[p.lon,p.lat]);
       planned={signature:signature(),order:ordered.map(p=>p.id),km,mins,geometry,
-        approximate:matrixApproximate||!route, roadLine:Boolean(route)};
+        approximate:matrixApproximate||!route||ordered.some(p=>p.precision!=='exata'), roadLine:Boolean(route)};
       started=false;save();drawAll();fitMap();
       showToast(route?'Rota calculada. Agora você pode começar as entregas.':'Ordem calculada, mas o percurso está aproximado.');
     } catch(error) { ui.heroNotice.textContent='Não foi possível otimizar agora. Tente novamente.';showToast(error.message||'Erro ao otimizar.'); }
@@ -792,7 +846,7 @@
       const num=el('span','stop-index',String(index+1));
       const info=el('div','stop-info');
       info.append(el('strong',stop.concluida?'done':'',stop.endereco));
-      info.append(el('small','',`${stop.concluida?'Concluída':'Pendente'} · ${stop.precision==='exata'?'Número localizado no mapa':'Localização aproximada'}`));
+      info.append(el('small','',`${stop.concluida?'Concluída':'Pendente'} · ${stop.precision==='exata'?'Número identificado no mapa':stop.precision==='estimada'?'Número estimado na rua':'Localização aproximada da rua'}`));
       const actions=el('div','stop-actions');
       const link=el('a','', '↗ Navegar');link.href=locationURL(stop);link.target='_blank';link.rel='noopener noreferrer';
       const mark=buildButton(stop.concluida?'↶ Desfazer':'✓ Entregue',()=>{

@@ -33,9 +33,8 @@
     <main class="main" id="inicio">
       <div class="mobile-brand"><span class="logo-mark small" aria-hidden="true">↝</span><strong>RotaFácil</strong></div>
       <section class="hero" aria-labelledby="principal-titulo">
-        <div class="hero-copy"><span class="kicker">PLANEJAMENTO DE ENTREGAS</span><h1 id="principal-titulo">Sua rota, <span>sem desvios.</span></h1><p>Adicione todos os endereços. Quando terminar, encontre o melhor caminho com um toque.</p>
-          <div class="hero-actions"><button id="btn-otimizar" class="btn btn-lime" type="button">✦ <span>Otimizar rota</span></button><button id="btn-iniciar" class="btn btn-outline" type="button" disabled>▶ Começar entregas</button></div>
-          <div id="hero-notice" class="hero-notice" role="status" aria-live="polite">Adicione suas entregas para começar.</div>
+        <div class="hero-copy"><span class="kicker">PLANEJAMENTO DE ENTREGAS</span><h1 id="principal-titulo">Sua rota, <span>sem desvios.</span></h1><p>Adicione seus endereços. Em seguida, otimize e comece suas entregas na própria lista.</p>
+
         </div>
         <div class="hero-summary" aria-label="Resumo da rota"><div><span>ENTREGAS</span><strong id="hero-qtd">0</strong></div><div><span>DISTÂNCIA</span><strong id="hero-km">—</strong></div><div><span>TEMPO ESTIMADO</span><strong id="hero-min">—</strong></div></div>
       </section>
@@ -57,7 +56,10 @@
         </div>
       </section>
 
-      <section class="section" id="entregas" aria-labelledby="titulo-entregas"><div class="heading"><div><span class="eyebrow">03 / ORGANIZAÇÃO</span><h2 id="titulo-entregas">Minha lista de entregas</h2></div><span id="count-badge" class="pill">0 paradas</span></div><div class="panel list-panel"><div class="list-heading"><div><strong>Seus destinos</strong><p id="list-subtitle">Nenhuma entrega adicionada.</p></div><span class="muted-hint">A ordem muda somente após otimizar</span></div><div id="stops-list" class="stops-list" aria-live="polite"></div><div class="list-footer"><button id="btn-limpar-feitas" type="button">Remover concluídas</button><button id="btn-apagar-tudo" type="button">Apagar rota</button></div></div></section>
+      <section class="section" id="entregas" aria-labelledby="titulo-entregas"><div class="heading"><div><span class="eyebrow">03 / ORGANIZAÇÃO</span><h2 id="titulo-entregas">Minha lista de entregas</h2></div><span id="count-badge" class="pill">0 paradas</span></div><div class="route-action-bar" aria-label="Planejamento da rota">
+          <div class="route-action-heading"><strong>Pronto para organizar suas entregas?</strong><p id="hero-notice" role="status" aria-live="polite">Adicione suas entregas para começar.</p></div>
+          <div class="hero-actions"><button id="btn-otimizar" class="btn btn-lime" type="button">✦ <span>Otimizar rota</span></button><button id="btn-iniciar" class="btn btn-outline" type="button" disabled>▶ Começar rota</button></div>
+        </div><div class="panel list-panel"><div class="list-heading"><div><strong>Seus destinos</strong><p id="list-subtitle">Nenhuma entrega adicionada.</p></div><span class="muted-hint">A ordem muda somente após otimizar</span></div><div id="stops-list" class="stops-list" aria-live="polite"></div><div class="list-footer"><button id="btn-limpar-feitas" type="button">Remover concluídas</button><button id="btn-apagar-tudo" type="button">Apagar rota</button></div></div></section>
 
       <section class="section" id="resumo" aria-labelledby="titulo-resumo"><div class="heading"><div><span class="eyebrow">04 / PROGRESSO</span><h2 id="titulo-resumo">Resultados</h2></div></div><div class="stat-grid"><div class="stat dark"><span>PARADAS</span><strong id="stat-total">0</strong><small>Na sua rota</small></div><div class="stat"><span>PENDENTES</span><strong id="stat-pendentes">0</strong><small>Por entregar</small></div><div class="stat"><span>CONCLUÍDAS</span><strong id="stat-concluidas">0</strong><small>Entregues</small></div><div class="stat"><span>PROGRESSO</span><strong id="stat-percent">0%</strong><div class="progress"><span id="progress-bar"></span></div></div></div></section>
       <footer class="foot">RotaFácil © 2026 · Planeje, otimize e entregue.</footer>

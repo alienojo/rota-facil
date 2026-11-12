@@ -9,3 +9,37 @@
 
 /* Indicação discreta de endereço identificado pela base de mapas. */
 .suggestion em.verified{color:#22784b;font-weight:700}
+
+/* V11 · Os comandos de rota agora ficam imediatamente antes da lista. */
+.route-action-bar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 16px;
+  border: 1px solid #d8e5d9;
+  border-radius: 18px;
+  padding: 19px 21px;
+  margin-bottom: 13px;
+  background: #183c32;
+  color: #f4fff4;
+}
+.route-action-heading { flex: 1 1 205px; min-width: 0; }
+.route-action-heading strong { display: block; font-size: 14px; font-weight: 800; }
+.route-action-heading p { margin: 6px 0 0; font-size: 12px; line-height: 1.45; color: #bcd4c7; }
+.route-action-bar .hero-actions { display: flex; flex: 0 1 auto; gap: 9px; flex-wrap: wrap; }
+.route-action-bar .hero-actions .btn { white-space: nowrap; min-height: 44px; }
+.route-action-bar .hero-actions .btn-outline { border: 1px solid #6c8a79; color: #f2fff4; background: #244d3f; }
+.route-action-bar .hero-actions .btn-outline:not(:disabled):hover { background: #32624e; }
+.stop-info .stop-accuracy { margin-top: 6px; font-size: 11px; }
+.stop-info .stop-accuracy.exact { color: #23764d; }
+.stop-info .stop-accuracy.estimated { color: #8a6434; }
+@media (max-width: 700px) {
+  .route-action-bar { align-items: stretch; padding: 16px; }
+  .route-action-bar .hero-actions { flex: 1 1 100%; }
+  .route-action-bar .hero-actions .btn { flex: 1 1 145px; }
+}
+@media (max-width: 390px) {
+  .route-action-bar .hero-actions { flex-direction: column; }
+  .route-action-bar .hero-actions .btn { width: 100%; flex-basis: auto; }
+}
