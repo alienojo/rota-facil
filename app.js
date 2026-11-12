@@ -1,8 +1,8 @@
 (() => {
   'use strict';
-  /* RotaFácil V17: redesenho da arquitetura do mapa.
-     Pontos, números, linha e GPS são fontes GeoJSON desenhadas no mesmo canvas WebGL.
-     Não usamos maplibregl.Marker, elementos HTML sobre coordenadas ou CSS transforms para pinos. */
+  /* RotaFácil V18. Marcadores como imagens de símbolo em camadas MapLibre/GeoJSON.
+     Os pinos são ancorados à coordenada pela ponta; não usam posicionamento por CSS.
+     GPS passivo: consulta de baixa precisão somente com mapa aberto/visível. */
   const CFG = {
     mapStyle: 'https://tiles.openfreemap.org/styles/positron',
     photon: 'https://photon.komoot.io/api/',
@@ -29,7 +29,7 @@
     openMap: $('open-map-button'), list: $('stops-list'), listDetail: $('list-detail'),
     clearComplete: $('clear-complete'), clearAll: $('clear-all'),
     map: $('map'), mapError: $('map-error'), mapStatus: $('map-status'),
-    gps: $('gps-button'), fit: $('fit-button'),
+    gps: $('gps-button'), gpsIndicator: $('gps-indicator'), fit: $('fit-button'),
     card: $('map-card'), cardClose: $('map-card-close'), cardLabel: $('map-card-label'),
     cardAddress: $('map-card-address'), cardDetail: $('map-card-detail'), cardChoices: $('map-card-choices'),
     cardActions: $('map-card-actions'), cardNav: $('map-card-navigate'), cardDone: $('map-card-done'),
@@ -98,7 +98,9 @@
   let requestSeq = 0, requestController = null, inputTimer = null, suggestions = [], activeSuggestion = -1;
   let map = null, mapReady = false, mapRequested = false, activeView = 'entregas';
   let focusedStopId = null, cardGroup = [], mapPointFeatures = [];
-  let gpsId = null, gpsFix = null, gpsPulseTimer = null, arrivalNotified = null;
+  let gpsFix = null, gpsTimer = null, gpsPending = false, gpsDenied = false, arrivalNotified = null;
+  const GPS_REFRESH_MS = 75000; // não manter o GPS de alta precisão ativo em segundo plano
+  const PIN_IMAGE_PREFIX = 'rf-pin-';
   let toastTimer = null;
   const responseCache = new Map();
   let lastSearchAt = 0, photonChain = Promise.resolve();
@@ -152,9 +154,14 @@
     ui.title.textContent = ({entregas:'Planejar entregas', mapa:'Seu mapa de rotas', resumo:'Resultados do dia'})[name];
     if (name === 'mapa') {
       ensureMap();
+      startPassiveGPS();
       requestAnimationFrame(() => { if (map) { map.resize(); updateMapSources(); if (focusId) { focusStop(focusId); } } });
-      // Resize again once browser has committed tab visibility (critical on mobile).
+      // Resize once more after the hidden tab has become visible.
       setTimeout(() => { if (map && activeView === 'mapa') map.resize(); }, 110);
+    } else {
+      stopPassiveGPS();
+      // Ao voltar à aba Mapa, não reabrimos um endereço que o usuário já fechou ao trocar de tela.
+      if (focusedStopId) closeCard();
     }
   }
   ui.tabs.forEach(tab => tab.addEventListener('click', () => openView(tab.dataset.view)));
@@ -456,52 +463,119 @@
     if(!planValid() || !Array.isArray(plan.geometry) || plan.geometry.length<2)return emptyFC();
     return {type:'FeatureCollection',features:[{type:'Feature',properties:{type:'route'},geometry:{type:'LineString',coordinates:plan.geometry}}]};
   }
-  function gpsData(){return gpsFix && isPoint(gpsFix)?{type:'FeatureCollection',features:[pointFeature('gps',gpsFix.lon,gpsFix.lat,{id:'gps'})]}:emptyFC();}
-  function updateMapSources(){
-    if(!mapReady||!map)return;
-    const points=map.getSource('rf-points'),line=map.getSource('rf-route'),gps=map.getSource('rf-gps');
-    if(points)points.setData(makePointData());
-    if(line)line.setData(routeData());
-    if(gps)gps.setData(gpsData());
+  function gpsData(){
+    return gpsFix && isPoint(gpsFix) ? {
+      type:'FeatureCollection', features:[pointFeature('gps', gpsFix.lon, gpsFix.lat, {id:'gps'})]
+    } : emptyFC();
   }
-  function addMapLayers(){
-    if(!map || map.getSource('rf-points'))return;
-    map.addSource('rf-route',{type:'geojson',data:emptyFC()});
-    map.addLayer({id:'rf-route-line',type:'line',source:'rf-route',layout:{'line-cap':'round','line-join':'round'},paint:{'line-color':'#13a278','line-width':5,'line-opacity':0.92}});
-    map.addSource('rf-points',{type:'geojson',data:emptyFC()});
-    map.addLayer({id:'rf-point-halo',type:'circle',source:'rf-points',paint:{
-      'circle-radius':['case',['==',['get','selected'],1],23,0],
-      'circle-color':'#d5f779','circle-opacity':0.65,'circle-blur':0.35}});
-    map.addLayer({id:'rf-point-circles',type:'circle',source:'rf-points',paint:{
-      'circle-radius':['case',['==',['get','status'],'origin'],16,['==',['get','status'],'next'],17,15],
-      'circle-color':['match',['get','status'],'origin','#2466a7','next','#e05e4d','done','#94a69c','approx','#b28346','#14866c'],
-      'circle-stroke-width':3,'circle-stroke-color':'#ffffff','circle-opacity':1}});
-    map.addLayer({id:'rf-point-labels',type:'symbol',source:'rf-points',layout:{'text-field':['get','label'],'text-size':12,'text-font':['Open Sans Bold','Arial Unicode MS Bold'],'text-allow-overlap':true,'text-ignore-placement':true},paint:{'text-color':'#fff','text-halo-width':0}});
-    map.addSource('rf-gps',{type:'geojson',data:emptyFC()});
-    map.addLayer({id:'rf-gps-halo',type:'circle',source:'rf-gps',paint:{'circle-radius':17,'circle-color':'#2679e7','circle-opacity':0.18,'circle-blur':0.3}});
-    map.addLayer({id:'rf-gps-dot',type:'circle',source:'rf-gps',paint:{'circle-radius':8,'circle-color':'#2b80ec','circle-stroke-width':3,'circle-stroke-color':'#fff'}});
-    const openPoint=e=>{const f=e.features?.[0];if(f)showFeatureCard(f);};
-    for(const layer of ['rf-point-circles','rf-point-labels']){
-      map.on('click',layer,openPoint);
-      map.on('mouseenter',layer,()=>{map.getCanvas().style.cursor='pointer';});
-      map.on('mouseleave',layer,()=>{map.getCanvas().style.cursor='';});
+
+  // Um pino desenhado em canvas e convertido para imagem do mapa. A PONTA é a âncora.
+  // Não depende de fontes externas de glyphs e não usa elementos HTML deslocáveis.
+  function pinImage(status, label, selected) {
+    const ratio = 2, w = 42, h = 50;
+    const canvas = document.createElement('canvas'); canvas.width = w*ratio; canvas.height = h*ratio;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) throw new Error('Canvas 2D indisponível para o desenho dos pinos');
+    ctx.scale(ratio, ratio);
+    const colors = { origin:'#2869ad', next:'#e05e4d', done:'#9baa9f', approx:'#b28243', pending:'#14866c' };
+    const color = colors[status] || colors.pending;
+    ctx.shadowColor = 'rgba(14,40,33,.30)'; ctx.shadowBlur=6; ctx.shadowOffsetY=3;
+    ctx.beginPath();
+    ctx.moveTo(21,49);
+    ctx.bezierCurveTo(16,40,3,28,3,20);
+    ctx.bezierCurveTo(3,9,11,3,21,3);
+    ctx.bezierCurveTo(31,3,39,10,39,20);
+    ctx.bezierCurveTo(39,29,26,41,21,47);
+    ctx.closePath(); ctx.fillStyle=color; ctx.fill();
+    ctx.shadowColor='transparent'; ctx.lineWidth=2.6; ctx.strokeStyle='#fff'; ctx.stroke();
+    if (selected) {
+      ctx.beginPath();ctx.arc(21,20,16,0,Math.PI*2);
+      ctx.strokeStyle='#d9f779';ctx.lineWidth=3.2;ctx.stroke();
     }
-    updateMapSources();
+    ctx.font = '800 14px system-ui, Arial, sans-serif';
+    ctx.textAlign='center'; ctx.textBaseline='middle'; ctx.fillStyle='#fff';
+    ctx.fillText(String(label).slice(0,4),21,20,27);
+    return ctx.getImageData(0,0,canvas.width,canvas.height);
   }
-  function ensureMap(){
-    if(mapRequested)return;
-    mapRequested=true;
-    if(typeof window.maplibregl==='undefined'){
-      ui.mapError.classList.remove('hidden');ui.mapStatus.textContent='Biblioteca de mapa indisponível.';return;
+  function keyForPin(p) {
+    // Image IDs are stable and derived from icon appearance; no user input interpolated in HTML.
+    const label = String(p.properties.label || '').replace(/[^0-9A-Za-z+]/g,'').slice(0,4) || '•';
+    const status = String(p.properties.status || 'pending').replace(/[^a-z]/g,'');
+    return `${PIN_IMAGE_PREFIX}${status}-${label}-${p.properties.selected ? 'selected' : 'plain'}`;
+  }
+  function ensurePinImages(data) {
+    if (!map || !mapReady) return;
+    for (const f of data.features) {
+      const id = keyForPin(f); f.properties.icon = id;
+      if (map.hasImage?.(id)) continue;
+      try {
+        const image = pinImage(f.properties.status, f.properties.label, Boolean(f.properties.selected));
+        map.addImage(id, image, {pixelRatio:2});
+      } catch (err) {
+        // Não deixa falhar todas as camadas se uma imagem não puder ser gerada.
+        console.warn('Falha ao desenhar pino:', err);
+      }
     }
+  }
+  function updateMapSources() {
+    if (!mapReady || !map) return;
+    const pointData = makePointData();
+    ensurePinImages(pointData);
+    const points=map.getSource('rf-points'), line=map.getSource('rf-route'), gps=map.getSource('rf-gps');
+    if (points) points.setData(pointData);
+    if (line) line.setData(routeData());
+    if (gps) gps.setData(gpsData());
+  }
+  function addMapLayers() {
+    if (!map) return;
+    // Em caso de falha parcial, cada fonte/camada é recuperada independentemente.
+    const source=(id)=>{ if(!map.getSource(id)) map.addSource(id,{type:'geojson',data:emptyFC()}); };
+    const layer=(cfg)=>{ if(!map.getLayer(cfg.id)) map.addLayer(cfg); };
     try {
-      map=new maplibregl.Map({container:'map',style:CFG.mapStyle,center:[origin.lon,origin.lat],zoom:12.4,attributionControl:true});
+      source('rf-route');
+      layer({id:'rf-route-line',type:'line',source:'rf-route',layout:{'line-cap':'round','line-join':'round'},paint:{'line-color':'#13a278','line-width':5,'line-opacity':0.92}});
+      source('rf-points');
+      // Pequeno ponto de segurança na coordenada se a imagem ainda não carregou.
+      layer({id:'rf-pin-anchor',type:'circle',source:'rf-points',paint:{'circle-radius':5,'circle-color':['match',['get','status'],'origin','#2869ad','next','#e05e4d','done','#9baa9f','approx','#b28243','#14866c'],'circle-stroke-width':1.5,'circle-stroke-color':'#ffffff'}});
+      layer({id:'rf-pin-icons',type:'symbol',source:'rf-points',layout:{'icon-image':['get','icon'],'icon-anchor':'bottom','icon-allow-overlap':true,'icon-ignore-placement':true,'icon-size':1}});
+      source('rf-gps');
+      // Sem animações nem brilho piscante; apenas um ponto azul e halo discreto.
+      layer({id:'rf-gps-halo',type:'circle',source:'rf-gps',paint:{'circle-radius':12,'circle-color':'#3184dc','circle-opacity':0.11}});
+      layer({id:'rf-gps-dot',type:'circle',source:'rf-gps',paint:{'circle-radius':6,'circle-color':'#2979d1','circle-stroke-width':2,'circle-stroke-color':'#fff'}});
+      if (!map._rfPinHandlersBound) {
+        const openPoint=e=>{const f=e.features?.[0];if(f)showFeatureCard(f);};
+        for (const l of ['rf-pin-icons','rf-pin-anchor']) {
+          map.on('click',l,openPoint);
+          map.on('mouseenter',l,()=>{map.getCanvas().style.cursor='pointer';});
+          map.on('mouseleave',l,()=>{map.getCanvas().style.cursor='';});
+        }
+        map._rfPinHandlersBound=true;
+      }
+      updateMapSources();
+    } catch (err) {
+      console.error('Não foi possível adicionar uma das camadas de marcadores:',err);
+      ui.mapStatus.textContent='Mapa carregado. Reabra a aba caso faltem marcadores.';
+    }
+  }
+  function ensureMap() {
+    if (mapRequested) return;
+    if (typeof window.maplibregl === 'undefined') {
+      ui.mapError.classList.remove('hidden');ui.mapStatus.textContent='Biblioteca de mapa indisponível.';
+      return;
+    }
+    mapRequested=true;
+    try {
+      map = new maplibregl.Map({container:'map',style:CFG.mapStyle,center:[origin.lon,origin.lat],zoom:12.4,attributionControl:true});
       map.addControl(new maplibregl.NavigationControl({showCompass:false}),'bottom-right');
-      map.on('load',()=>{mapReady=true;addMapLayers();map.resize();fitMap();});
-      map.on('error',e=>{console.warn('Aviso do provedor de mapa:',e.error||e);});
-      // Context restores/redraws are handled by MapLibre. On a new style, sources must be recreated.
-      map.on('style.load',()=>{if(mapReady&&!map.getSource('rf-points'))addMapLayers();});
-    } catch(e) {console.error('Falha ao iniciar mapa:',e);ui.mapError.classList.remove('hidden');ui.mapStatus.textContent='Mapa indisponível.';}
+      const styleReady=()=>{mapReady=true;ui.mapError.classList.add('hidden');addMapLayers();map.resize();};
+      // style.load é a referência para recriar fontes do app após estilos novos.
+      map.on('style.load',styleReady);
+      map.on('load',()=>{styleReady();fitMap();});
+      map.on('error',e=>{console.warn('Aviso do mapa:',e.error||e);});
+    } catch (err) {
+      console.error('Falha ao iniciar mapa:',err);mapRequested=false;
+      ui.mapError.classList.remove('hidden');ui.mapStatus.textContent='Mapa indisponível.';
+    }
   }
   function fitMap(){
     if(!mapReady||!map)return;
@@ -586,34 +660,73 @@
     navigator.geolocation.getCurrentPosition(pos=>{origin={endereco:'Minha localização GPS',lat:pos.coords.latitude,lon:pos.coords.longitude,personalizado:true};invalidate();save();render();fitMap();toast('Origem atualizada pelo GPS.');},()=>toast('Permita o GPS nas configurações do navegador.'),{enableHighAccuracy:true,timeout:15000});
   });
 
-  function updateGPS(){
-    if(!mapReady)return;
-    map.getSource('rf-gps')?.setData(gpsData());
-    if(gpsFix&&map.getLayer('rf-gps-halo'))map.setPaintProperty('rf-gps-halo','circle-radius',13+(Math.round(Date.now()/1500)%2)*7);
+  // GPS passivo e de baixo consumo: solicita uma leitura ao abrir o mapa e
+  // atualiza a cada 75 s SOMENTE com a aba Mapa visível e página em primeiro plano.
+  // O navegador controla a permissão; não é possível ignorar uma negativa do usuário.
+  function gpsAvailable() {
+    return 'geolocation' in navigator && window.isSecureContext !== false;
   }
-  function checkArrival(){
+  function setGPSIndicator(message) { ui.gpsIndicator.textContent=message; }
+  function updateGPS() {
+    if (!mapReady || !map) return;
+    map.getSource('rf-gps')?.setData(gpsData());
+  }
+  function checkArrival() {
+    // Passivo: não declara chegada precisa com uma leitura econômica / pouco confiável.
     if(!started||!gpsFix||gpsFix.accuracy>10)return;
     const next=nextStop();if(!next||next.id===arrivalNotified)return;
-    // Não declarar chegada exata quando o número é apenas um ponto aproximado da rua.
-    if(next.precision==='exata'&&next.accessConfirmed&&meters(gpsFix,{lat:next.navLat,lon:next.navLon})<=10){arrivalNotified=next.id;toast('Você chegou ao destino. Confirme a entrega.');}
+    if(next.precision==='exata'&&next.accessConfirmed&&meters(gpsFix,{lat:next.navLat,lon:next.navLon})<=10){
+      arrivalNotified=next.id;toast('Você chegou ao destino. Confirme a entrega.');
+    }
   }
-  function beginGPS(){
-    if(!navigator.geolocation){toast('GPS não suportado pelo navegador.');return;}
-    if(gpsId!==null)return;
-    try{gpsId=navigator.geolocation.watchPosition(pos=>{
+  function gpsCanPoll() {
+    return activeView==='mapa' && document.visibilityState==='visible' && !gpsDenied && gpsAvailable();
+  }
+  function readGPS({center=false}={}) {
+    if(!gpsAvailable()) {
+      setGPSIndicator('Localização disponível apenas em HTTPS');
+      if(center)toast('Abra o aplicativo por HTTPS ou localhost para usar a localização.');
+      return;
+    }
+    if(!center && !gpsCanPoll())return;
+    if(gpsPending)return;
+    gpsPending=true;
+    setGPSIndicator('Localizando...');
+    navigator.geolocation.getCurrentPosition(pos=>{
+      gpsPending=false;
       gpsFix={lat:pos.coords.latitude,lon:pos.coords.longitude,accuracy:pos.coords.accuracy,stamp:Date.now()};
-      updateGPS();checkArrival();
+      const ac=Math.round(pos.coords.accuracy);
+      setGPSIndicator(`Sua posição · ±${ac} m`);
+      updateGPS(); checkArrival();
+      if(center && mapReady && map) map.easeTo({center:[gpsFix.lon,gpsFix.lat],zoom:Math.max(map.getZoom(),15),duration:500});
     },err=>{
-      toast(err.code===1?'Permita o acesso à localização do dispositivo.':'GPS temporariamente indisponível.');stopGPS();
-    },{enableHighAccuracy:true,maximumAge:2000,timeout:15000});
-    }catch(e){toast('GPS não pôde ser ativado.');return;}
-    ui.gps.setAttribute('aria-pressed','true');ui.gps.textContent='◎ GPS ativo';
-    gpsPulseTimer=setInterval(updateGPS,3000);
+      gpsPending=false;
+      if(err.code===1) { gpsDenied=true;setGPSIndicator('Permissão de GPS negada'); }
+      else setGPSIndicator(gpsFix?'Última localização disponível':'GPS temporariamente indisponível');
+      if(center)toast(err.code===1?'Permita a localização nas configurações do navegador.':'Não foi possível obter sua posição agora.');
+    },{enableHighAccuracy:false,maximumAge:45000,timeout:12000});
   }
-  function stopGPS(){if(gpsId!==null){navigator.geolocation.clearWatch(gpsId);gpsId=null;}clearInterval(gpsPulseTimer);gpsPulseTimer=null;ui.gps.setAttribute('aria-pressed','false');ui.gps.textContent='◎ GPS';gpsFix=null;updateGPS();}
-  ui.gps.addEventListener('click',()=>gpsId===null?beginGPS():stopGPS());
-  window.addEventListener('pagehide',stopGPS);
-
+  function stopPassiveGPS() {
+    if(gpsTimer!==null){clearInterval(gpsTimer);gpsTimer=null;}
+  }
+  function startPassiveGPS() {
+    stopPassiveGPS();
+    if(!gpsCanPoll())return;
+    readGPS();
+    gpsTimer=setInterval(()=>{if(gpsCanPoll())readGPS();else stopPassiveGPS();},GPS_REFRESH_MS);
+  }
+  ui.gps.addEventListener('click',()=>{
+    if(gpsFix && Date.now()-gpsFix.stamp<60000 && mapReady && map){
+      map.easeTo({center:[gpsFix.lon,gpsFix.lat],zoom:Math.max(map.getZoom(),15),duration:500});
+    }else{
+      gpsDenied=false; // clique explícito permite tentar novamente após o usuário alterar permissões
+      readGPS({center:true});
+    }
+  });
+  document.addEventListener('visibilitychange',()=>{
+    if(document.visibilityState==='visible')startPassiveGPS();else stopPassiveGPS();
+  });
+  window.addEventListener('pagehide',stopPassiveGPS);
   function renderActions(){
     const valid=planValid(), pending=stops.filter(s=>!s.concluida).length;
     ui.start.disabled=!valid||started||working||pending===0;
@@ -634,6 +747,6 @@
     if (focusedStopId&&!stops.some(p=>p.id===focusedStopId))closeCard();
   }
   // Test hooks for local automated verification of geometry, legacy migration, and scheduling.
-  Object.defineProperty(window,'__rfDiagnostics',{value:Object.freeze({parsed,meters,makePointData,routeData,fingerprint,stops:()=>stops,planValid})});
+  Object.defineProperty(window,'__rfDiagnostics',{value:Object.freeze({parsed,meters,makePointData,routeData,fingerprint,stops:()=>stops,planValid,pinImage,gpsData})});
   save();render();
 })();
