@@ -1,1410 +1,639 @@
 (() => {
   'use strict';
-
-  // RotaFácil V16 — mapa prioritário, pinos geográficos estáveis e ações flutuantes.
-  // Photon oferece busca conforme digita; ViaCEP complementa rua, bairro e CEP.
-  // Para escala comercial, hospede um serviço de geocodificação com SLA/proxy próprio.
-  const CFG = Object.freeze({
-    photon: 'https://photon.komoot.io', viaCep: 'https://viacep.com.br/ws',
-    osrm: 'https://router.project-osrm.org',
-    overpass: 'https://overpass-api.de/api/interpreter',
-    addressLookupRadius: 2500, addressLookupTimeout: 7500,
+  /* RotaFácil V17: redesenho da arquitetura do mapa.
+     Pontos, números, linha e GPS são fontes GeoJSON desenhadas no mesmo canvas WebGL.
+     Não usamos maplibregl.Marker, elementos HTML sobre coordenadas ou CSS transforms para pinos. */
+  const CFG = {
     mapStyle: 'https://tiles.openfreemap.org/styles/positron',
-    debounceMs: 380, timeoutMs: 8000, maxStopsForRoadMatrix: 23, maxAddressChecks: 4,
-    defaultOrigin: { endereco: 'Centro de São José dos Campos, SP', lat: -23.1794, lon: -45.8869, personalizado: false }
-  });
-  const ID = id => document.getElementById(id);
-  const ui = {
-    input: ID('address-input'), listbox: ID('address-options'), searchLoading: ID('search-loading'),
-    scan: ID('btn-scan'), scanLabel: ID('scan-label'), scanFile: ID('scan-file'),
-    form: ID('form-add'), add: ID('btn-adicionar'), help: ID('address-message'), cancelEdit: ID('btn-cancel-edit'),
-    city: ID('city-input'), state: ID('state-input'),
-    optimize: ID('btn-otimizar'), start: ID('btn-iniciar'), heroNotice: ID('hero-notice'),
-    heroCount: ID('hero-qtd'), heroKm: ID('hero-km'), heroMin: ID('hero-min'),
-    map: ID('map'), mapPlaceholder: ID('map-placeholder'), mapStatus: ID('map-status'), mapBadge: ID('map-badge'),
-    gps: ID('btn-gps'), fit: ID('btn-enquadrar'), gpsMessage: ID('gps-message'),
-    originInput: ID('origin-input'), originBtn: ID('btn-definir-origem'), originGPS: ID('btn-origem-gps'),
-    originLabel: ID('origin-label'), originStatus: ID('origin-status'),
-    list: ID('stops-list'), subtitle: ID('list-subtitle'), count: ID('count-badge'),
-    clean: ID('btn-limpar-feitas'), reset: ID('btn-apagar-tudo'),
-    total: ID('stat-total'), pending: ID('stat-pendentes'), done: ID('stat-concluidas'),
-    percent: ID('stat-percent'), progressBar: ID('progress-bar'),
-    next: ID('next-stop'), nextNumber: ID('next-number'), nextAddress: ID('next-address'),
-    nextProgress: ID('next-progress'), nextNavigate: ID('next-navigate'), nextDone: ID('next-done'),
-    arrived: ID('arrival-note'), toast: ID('toast'),
-    tabs: [ID('tab-entregas'), ID('tab-mapa'), ID('tab-resumo')],
-    panels: [ID('panel-entregas'), ID('panel-mapa'), ID('panel-resumo')],
-    activeTabTitle: ID('active-tab-title'), topbarProgress: ID('topbar-progress'), navCount: ID('nav-count'),
-    openMap: ID('btn-open-map'), backDeliveries: ID('btn-back-deliveries'),
-    mapFloat: ID('map-float'), mapFloatClose: ID('map-float-close'),
-    mapFloatLabel: ID('map-float-label'), mapFloatStatus: ID('map-float-status'),
-    mapFloatAddress: ID('map-float-address'), mapFloatDetail: ID('map-float-detail'),
-    mapFloatNavigate: ID('map-float-navigate'), mapFloatDone: ID('map-float-done'),
-    mapFloatEdit: ID('map-float-edit'), mapFloatChoices: ID('map-float-choices'),
-    mapFloatActions: ID('map-float-actions'), mapHint: ID('map-hint'),
-    mapRoutePhase: ID('map-route-phase'), mapRouteNote: ID('map-route-note'),
-    mapRoutePending: ID('map-route-pending'), mapRouteKm: ID('map-route-km'), mapRouteTime: ID('map-route-time'),
-    mapSequence: ID('map-sequence-list'), mapSequenceStatus: ID('map-sequence-status'), mapSequenceHint: ID('map-sequence-hint'),
-    routeMap: ID('btn-route-map'), mapQuickInfo: ID('map-quick-info'),
-    mapRunner: ID('map-runner'), mapRunnerKicker: ID('map-runner-kicker'), mapRunnerAddress: ID('map-runner-address'),
-    mapRunnerDetail: ID('map-runner-detail'), mapRunnerNavigate: ID('map-runner-navigate'), mapRunnerMain: ID('map-runner-main'),
-    dock: ID('journey-dock'), dockKicker: ID('journey-dock-kicker'), dockTitle: ID('journey-dock-title'),
-    dockMap: ID('journey-dock-map'), dockAction: ID('journey-dock-action')
+    photon: 'https://photon.komoot.io/api/',
+    osrm: 'https://router.project-osrm.org',
+    debounceMs: 470,
+    maxTable: 22,
+    timeout: 12000,
+    defaultOrigin: { endereco: 'São José dos Campos, SP', lat: -23.1794, lon: -45.8869, personalizado: false }
   };
-  const missing = Object.entries(ui).flatMap(([key, element]) =>
-    Array.isArray(element) ? element.some(item => !item) ? [key] : [] : !element ? [key] : []);
-  if (missing.length) { console.error('RotaFácil: elementos não encontrados:', missing); return; }
+  const STORAGE = {
+    stops: 'rotafacil_paradas', origin: 'rotafacil_origem',
+    started: 'rotafacil_iniciada', plan: 'rotafacil_v9_rota', area: 'rotafacil_v9_area'
+  };
+  const $ = id => document.getElementById(id);
+  const ui = {
+    tabs: [...document.querySelectorAll('[data-view]')],
+    panels: { entregas: $('panel-entregas'), mapa: $('panel-mapa'), resumo: $('panel-resumo') },
+    title: $('page-title'), topProgress: $('top-progress'), navCount: $('nav-counter'), count: $('stop-count'),
+    form: $('address-form'), input: $('address-input'), suggest: $('address-suggestions'),
+    feedback: $('address-feedback'), add: $('add-button'), addLabel: $('add-button-label'),
+    editCancel: $('cancel-edit'), city: $('city-input'), uf: $('uf-input'),
+    scan: $('scan-button'), scanLabel: $('scan-label'), scanFile: $('scan-file'),
+    optimize: $('optimize-button'), start: $('start-button'), toMap: $('view-map-button'), actionHint: $('action-hint'),
+    openMap: $('open-map-button'), list: $('stops-list'), listDetail: $('list-detail'),
+    clearComplete: $('clear-complete'), clearAll: $('clear-all'),
+    map: $('map'), mapError: $('map-error'), mapStatus: $('map-status'),
+    gps: $('gps-button'), fit: $('fit-button'),
+    card: $('map-card'), cardClose: $('map-card-close'), cardLabel: $('map-card-label'),
+    cardAddress: $('map-card-address'), cardDetail: $('map-card-detail'), cardChoices: $('map-card-choices'),
+    cardActions: $('map-card-actions'), cardNav: $('map-card-navigate'), cardDone: $('map-card-done'),
+    dock: $('map-dock'), dockKicker: $('dock-kicker'), dockAddress: $('dock-address'),
+    dockDetail: $('dock-detail'), dockNav: $('dock-navigate'), dockAction: $('dock-action'),
+    mapRouteLabel: $('map-route-label'), mapKm: $('map-km'), mapTime: $('map-time'),
+    mapPending: $('map-pending'), sequence: $('map-sequence'),
+    originInput: $('origin-input'), originSet: $('origin-set'), originGps: $('origin-gps'), originDescription: $('origin-description'),
+    statTotal: $('stat-total'), statPending: $('stat-pending'), statDone: $('stat-done'), statPercent: $('stat-percent'),
+    progressBar: $('progress-bar'), summaryRouteTitle: $('summary-route-title'), summaryRouteDescription: $('summary-route-description'), summaryMap: $('summary-open-map'), toast: $('toast')
+  };
+  const missing = Object.entries(ui).filter(([key, v]) => key !== 'tabs' && (v == null || (key === 'panels' && Object.values(v).some(x => !x))));
+  if (missing.length) { console.error('RotaFácil: elementos HTML ausentes', missing.map(([k]) => k)); return; }
 
-  const STORE = { stops: 'rotafacil_paradas', origin: 'rotafacil_origem', started: 'rotafacil_iniciada', route: 'rotafacil_v9_rota', searchArea: 'rotafacil_v9_area' };
-  const getJSON = (key, fallback) => { try { const str = localStorage.getItem(key); return str === null ? fallback : JSON.parse(str); } catch { return fallback; } };
-  function validPoint(point) {
-    const lat = Number(point?.lat), lon = Number(point?.lon);
-    return point && point.lat !== '' && point.lon !== '' && point.lat != null && point.lon != null &&
-      Number.isFinite(lat) && Number.isFinite(lon) && Math.abs(lat) <= 90 && Math.abs(lon) <= 180;
+  const getSaved = (key, fallback) => { try { const raw = localStorage.getItem(key); return raw === null ? fallback : JSON.parse(raw); } catch { return fallback; } };
+  const isPoint = p => p != null && p.lat !== '' && p.lon !== '' && p.lat != null && p.lon != null &&
+    Number.isFinite(Number(p.lat)) && Number.isFinite(Number(p.lon)) && Math.abs(Number(p.lat)) <= 90 && Math.abs(Number(p.lon)) <= 180;
+  const norm = s => String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  const normRoad = s => norm(s).replace(/^(rua|avenida|av|travessa|alameda|estrada|rodovia|praca) /,'');
+  const fmtNumber = n => Number(n).toLocaleString('pt-BR', { maximumFractionDigits: 1 });
+  const html = (tag, cls = '', label = '') => { const node = document.createElement(tag); node.className = cls; node.textContent = String(label); return node; };
+  function parsed(text) {
+    const raw = String(text || '').trim().replace(/\s+/g, ' ');
+    const parts = raw.split(/[—,]/).map(s => s.trim()).filter(Boolean);
+    const first = parts[0] || raw;
+    const secondNum = parts.length > 1 && /^(?:n[º°o]?\.?\s*)?\d{1,5}[a-z]?$/i.test(parts[1]);
+    const match = secondNum ? null : first.match(/^(.*?)\s+(?:n[º°o]?\.?\s*)?(\d{1,5}[a-z]?)$/i);
+    if (secondNum) return { road: first, number: parts[1].replace(/^n[º°o]?\.?\s*/i, ''), remainder: parts.slice(2).join(', ') };
+    if (match && match[1] && !/^(?:rua|avenida|av\.?|travessa)$/i.test(match[1])) return { road: match[1], number: match[2], remainder: parts.slice(1).join(', ') };
+    return { road: first, number: '', remainder: parts.slice(1).join(', ') };
   }
-  function cleanedStop(item) {
-    if (!validPoint(item) || typeof item.endereco !== 'string') return null;
-    // V15 podia substituir o ponto original pelo encaixe na rua. Migrar essas
-    // entradas antigas sem perder a posição original nem o ponto de navegação.
-    const hasProperty = validPoint({lat:item.propertyLat,lon:item.propertyLon});
-    const hasNavigation = validPoint({lat:item.navLat,lon:item.navLon});
-    const legacySnap = (item.precision || item.precisao) === 'aproximada' &&
-      Boolean(item.locationChecked) && hasProperty && hasNavigation &&
-      Math.abs(Number(item.lat)-Number(item.navLat))<0.0000001 &&
-      Math.abs(Number(item.lon)-Number(item.navLon))<0.0000001 &&
-      (Math.abs(Number(item.lat)-Number(item.propertyLat))>0.0000001 ||
-       Math.abs(Number(item.lon)-Number(item.propertyLon))>0.0000001);
-    return {
-      id: String(item.id ?? `${Date.now()}-${Math.random()}`), endereco: item.endereco,
-      lat: legacySnap ? Number(item.propertyLat) : Number(item.lat),
-      lon: legacySnap ? Number(item.propertyLon) : Number(item.lon), concluida: Boolean(item.concluida),
-      precision: item.precision || item.precisao || 'aproximada',
-      city: String(item.city || item.campos?.cidade || ''), uf: String(item.uf || item.campos?.uf || 'SP'),
-      number: String(item.number || item.campos?.numero || parseAddress(item.endereco).number || ''),
-      urgent: Boolean(item.urgent || item.urgente),
-      notes: String(item.notes || item.notas || '').slice(0, 200),
-      road: String(item.road || parseAddress(item.endereco).road || ''), district: String(item.district || ''),
-      propertyLat: validPoint({lat:item.propertyLat,lon:item.propertyLon}) ? Number(item.propertyLat) : Number(item.lat),
-      propertyLon: validPoint({lat:item.propertyLat,lon:item.propertyLon}) ? Number(item.propertyLon) : Number(item.lon),
-      navLat: validPoint({lat:item.navLat,lon:item.navLon}) ? Number(item.navLat) : Number(item.lat),
-      navLon: validPoint({lat:item.navLat,lon:item.navLon}) ? Number(item.navLon) : Number(item.lon),
-      locationChecked: Boolean(item.locationChecked), roadMatched: Boolean(item.roadMatched || legacySnap), accessConfirmed: Boolean(item.accessConfirmed), locationSource: String(item.locationSource || '')
+  function normalizeStop(p) {
+    if (!isPoint(p) || typeof p.endereco !== 'string' || !p.endereco.trim()) return null;
+    // V15/V16 às vezes gravavam o encaixe viário no lugar do imóvel.
+    const legacySnap = p.locationChecked && p.precision === 'aproximada' && isPoint({lat:p.propertyLat,lon:p.propertyLon}) &&
+      isPoint({lat:p.navLat,lon:p.navLon}) && Math.abs(Number(p.lat) - Number(p.navLat)) < 1e-7 &&
+      Math.abs(Number(p.lon) - Number(p.navLon)) < 1e-7;
+    const lat = legacySnap ? Number(p.propertyLat) : Number(p.lat);
+    const lon = legacySnap ? Number(p.propertyLon) : Number(p.lon);
+    const parts = parsed(p.endereco);
+    return { id: String(p.id ?? `${Date.now()}-${Math.random()}`), endereco: p.endereco,
+      lat, lon, concluida: Boolean(p.concluida), precision: p.precision || p.precisao || 'aproximada',
+      road: String(p.road || parts.road), number: String(p.number || parts.number || ''),
+      city: String(p.city || p.campos?.cidade || ''), uf: String(p.uf || p.campos?.uf || 'SP'),
+      district: String(p.district || p.campos?.bairro || ''), notes: String(p.notes || p.notas || '').slice(0, 200),
+      urgent: Boolean(p.urgent || p.urgente),
+      // Coordenadas do imóvel são imutáveis durante a otimização.
+      propertyLat: Number(isPoint({lat:p.propertyLat,lon:p.propertyLon}) ? p.propertyLat : lat),
+      propertyLon: Number(isPoint({lat:p.propertyLat,lon:p.propertyLon}) ? p.propertyLon : lon),
+      navLat: Number(isPoint({lat:p.navLat,lon:p.navLon}) ? p.navLat : lat),
+      navLon: Number(isPoint({lat:p.navLat,lon:p.navLon}) ? p.navLon : lon),
+      roadMatched: Boolean(p.roadMatched), accessConfirmed: Boolean(p.accessConfirmed)
     };
   }
-  let stops = (Array.isArray(getJSON(STORE.stops, [])) ? getJSON(STORE.stops, []) : []).map(cleanedStop).filter(Boolean);
-  stops.forEach(stop => { if (stop.precision === 'exata' && validPoint({lat:stop.propertyLat,lon:stop.propertyLon})) { stop.lat=stop.propertyLat; stop.lon=stop.propertyLon; } });
-  let origin = getJSON(STORE.origin, { ...CFG.defaultOrigin });
-  if (!validPoint(origin)) origin = { ...CFG.defaultOrigin };
+  const rawStops = getSaved(STORAGE.stops, []);
+  let stops = (Array.isArray(rawStops) ? rawStops : []).map(normalizeStop).filter(Boolean);
+  let origin = getSaved(STORAGE.origin, { ...CFG.defaultOrigin });
+  if (!isPoint(origin)) origin = { ...CFG.defaultOrigin };
   origin = { ...origin, lat: Number(origin.lat), lon: Number(origin.lon) };
-  const savedArea = getJSON(STORE.searchArea, { city: 'São José dos Campos', uf: 'SP' });
-  ui.city.value = String(savedArea?.city || 'São José dos Campos');
-  ui.state.value = String(savedArea?.uf || 'SP');
-  let planned = getJSON(STORE.route, null);
-  let started = Boolean(getJSON(STORE.started, false));
-  let editingId = null;
-  let routeRevision = 0;
-  let optimizing = false;
-  let selected = null;
-  let highlighted = -1;
-  let currentSuggestions = [];
-  let searchSeq = 0;
-  let searchController = null;
-  let searchTimer = null;
+  const area = getSaved(STORAGE.area, { city: 'São José dos Campos', uf: 'SP' });
+  ui.city.value = String(area?.city || 'São José dos Campos');
+  ui.uf.value = String(area?.uf || 'SP');
+  let plan = getSaved(STORAGE.plan, null);
+  let started = Boolean(getSaved(STORAGE.started, false));
+  let revision = 0, working = false, editingId = null, selectedSuggestion = null;
+  let requestSeq = 0, requestController = null, inputTimer = null, suggestions = [], activeSuggestion = -1;
+  let map = null, mapReady = false, mapRequested = false, activeView = 'entregas';
+  let focusedStopId = null, cardGroup = [], mapPointFeatures = [];
+  let gpsId = null, gpsFix = null, gpsPulseTimer = null, arrivalNotified = null;
   let toastTimer = null;
-  const searchCache = new Map();
-  let lastPhotonTime = 0;
-  let photonQueue = Promise.resolve();
-  let map = null, mapReady = false, gpsMarker = null, gpsAccuracyMarker = null, markers = [];
-  let gpsWatchId = null, gpsVisualTimer = null, gpsFix = null, activeArrivalId = null;
-  let activeTab = 'entregas', mapInitialized = false, focusedStopId = null, focusedGroupKey = null;
-  let mapSizeObserver = null;
-  const roadSnapCache = new Map();
-  const refineInProgress = new Set();
+  const responseCache = new Map();
+  let lastSearchAt = 0, photonChain = Promise.resolve();
 
-  function signature() { return JSON.stringify({ origin: [origin.lat, origin.lon], stops: stops.map(p => [p.id, p.lat, p.lon, p.navLat, p.navLon, p.concluida]) }); }
-  function routeValid() { return planned && planned.signature === signature() && Array.isArray(planned.order) && planned.order.length > 0; }
-  if (!routeValid()) { planned = null; started = false; }
+  function fingerprint() { return JSON.stringify({ origin: [origin.lat, origin.lon], stops: stops.map(p => [p.id, p.lat, p.lon, p.navLat, p.navLon]) }); }
+  function legacyFingerprint() { return JSON.stringify({ origin: [origin.lat, origin.lon], stops: stops.map(p => [p.id, p.lat, p.lon, p.navLat, p.navLon, p.concluida]) }); }
+  function planValid() { return !!(plan && typeof plan === 'object' && Array.isArray(plan.order) && plan.order.length > 0 && plan.signature === fingerprint()); }
+  if (plan && (plan.signature === legacyFingerprint() || plan.signature === fingerprint())) {
+    plan.signature = fingerprint();
+  } else { plan = null; started = false; }
   function save() {
     try {
-      localStorage.setItem(STORE.stops, JSON.stringify(stops));
-      localStorage.setItem(STORE.origin, JSON.stringify(origin));
-      localStorage.setItem(STORE.started, JSON.stringify(started));
-      if (planned) localStorage.setItem(STORE.route, JSON.stringify(planned));
-      else localStorage.removeItem(STORE.route);
-      localStorage.setItem(STORE.searchArea, JSON.stringify({ city: ui.city.value.trim(), uf: ui.state.value.trim().toUpperCase() }));
-    } catch (error) { console.error('Não foi possível salvar o projeto:', error); showToast('Não foi possível salvar os dados neste navegador.'); }
+      localStorage.setItem(STORAGE.stops, JSON.stringify(stops));
+      localStorage.setItem(STORAGE.origin, JSON.stringify(origin));
+      localStorage.setItem(STORAGE.started, JSON.stringify(started));
+      localStorage.setItem(STORAGE.area, JSON.stringify({ city: ui.city.value.trim(), uf: ui.uf.value.trim().toUpperCase() }));
+      if (planValid()) localStorage.setItem(STORAGE.plan, JSON.stringify(plan));
+      else localStorage.removeItem(STORAGE.plan);
+    } catch (e) { console.error('Falha ao salvar:', e); toast('Não foi possível salvar os dados no navegador.'); }
   }
-  function textStatus(message, error = false) { ui.help.textContent = message; ui.help.classList.toggle('error', error); ui.help.classList.toggle('success', !error && /adicionada|atualizado|selecionado|adicionado/.test(message.toLowerCase())); }
-  function showToast(message) { ui.toast.textContent = message; ui.toast.classList.remove('hidden'); clearTimeout(toastTimer); toastTimer = setTimeout(() => ui.toast.classList.add('hidden'), 3900); }
-  function setBusy(button, busy, busyMessage) {
-    if (busy) { button.dataset.original = button.textContent; button.textContent = busyMessage; }
-    else if (button.dataset.original !== undefined) { button.textContent = button.dataset.original; delete button.dataset.original; }
+  function invalidate() { revision++; plan = null; started = false; arrivalNotified = null; }
+  function toast(text) { ui.toast.textContent = text; ui.toast.classList.remove('hidden'); clearTimeout(toastTimer); toastTimer = setTimeout(() => ui.toast.classList.add('hidden'), 4200); }
+  function feedback(text, error = false) { ui.feedback.textContent = text; ui.feedback.classList.toggle('error', error); ui.feedback.classList.toggle('good', !error); }
+  function buttonBusy(button, busy, text) {
     button.disabled = busy;
+    // Never replace innerHTML of the address button: its label is referenced by ui.addLabel.
+    // Replacing it detached that node and broke the next editing operation.
+    if (button === ui.add) {
+      ui.addLabel.textContent = busy ? text : (editingId ? 'Salvar edição' : 'Adicionar');
+      return;
+    }
+    if (busy) { button.dataset.prevText = button.textContent; button.textContent = text; }
+    else if (button.dataset.prevText !== undefined) { button.textContent = button.dataset.prevText; delete button.dataset.prevText; }
   }
-  function invalidate() { routeRevision++; planned = null; started = false; activeArrivalId = null; }
-  const radians = deg => deg * Math.PI / 180;
-  function meters(a, b) {
-    const dLat = radians(b.lat - a.lat), dLon = radians(b.lon - a.lon);
-    const h = Math.sin(dLat / 2) ** 2 + Math.cos(radians(a.lat)) * Math.cos(radians(b.lat)) * Math.sin(dLon / 2) ** 2;
-    return 12742000 * Math.atan2(Math.sqrt(h), Math.sqrt(Math.max(0, 1 - h)));
-  }
-  const norm = s => String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
-  const normalizeRoad = s => norm(s).replace(/^(rua|avenida|av|travessa|alameda|estrada|rodovia|praca)\s+/, '');
-  const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
-  // Ao navegar para uma casa não mapeada, o Google Maps pode resolver o número
-  // pelo próprio banco de dados. Não repassar o centro da rua como se fosse a residência.
-  const locationURL = p => {
-    const dest = p.precision === 'exata'
-      ? `${p.navLat ?? p.lat},${p.navLon ?? p.lon}`
-      : `${p.road || p.endereco}, ${p.number || ''}, ${p.district || ''}, ${p.city || ''}, ${p.uf || ''}, Brasil`;
-    return `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(dest)}&travelmode=driving`;
+  function meters(a,b) { const rad=x=>x*Math.PI/180, dlat=rad(b.lat-a.lat), dlon=rad(b.lon-a.lon); const h=Math.sin(dlat/2)**2+Math.cos(rad(a.lat))*Math.cos(rad(b.lat))*Math.sin(dlon/2)**2;return 12742000*Math.atan2(Math.sqrt(h),Math.sqrt(Math.max(0,1-h))); }
+  const navLink = p => {
+    const destination = p.precision === 'exata' && p.accessConfirmed && isPoint({lat:p.navLat,lon:p.navLon})
+      ? `${p.navLat},${p.navLon}`
+      : `${p.endereco}${p.city && !norm(p.endereco).includes(norm(p.city)) ? `, ${p.city}` : ''}, ${p.uf || 'SP'}, Brasil`;
+    return `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(destination)}&travelmode=driving`;
   };
-
-  // ---- Address parsing. Never interpret 'Rua 7 de Setembro' as house number 7. ----
-  function parseAddress(text) {
-    const raw = String(text || '').replace(/\s+/g, ' ').trim();
-    const postcodeMatch = raw.match(/\b\d{5}-?\d{3}\b/);
-    const postcode = postcodeMatch ? postcodeMatch[0].replace(/\D/g, '') : '';
-    const cleaned = postcode ? raw.replace(postcodeMatch[0], ' ').replace(/\s+/g, ' ').trim() : raw;
-    let number = '', road = cleaned, extra = '';
-    const matches = [...cleaned.matchAll(/\b(?:n[º°o]?\.?\s*)?(\d{1,5}[A-Za-z]?)\b/gi)];
-    for (const m of matches.reverse()) {
-      const before = cleaned.slice(0, m.index).trim();
-      const after = cleaned.slice(m.index + m[0].length).trim();
-      const wordBefore = before.split(/[\s,]+/).at(-1)?.toLowerCase();
-      if (!before || (['rua','av','avenida','rodovia','travessa'].includes(wordBefore) && /^de\b/i.test(after))) continue;
-      if (matches.length === 1 && ['rua','av','avenida','rodovia','travessa'].includes(wordBefore)) continue;
-      number = m[1]; road = before.replace(/[\s,º°#-]+$/, '').trim();
-      extra = after.replace(/^[\s,;\-]+/, '').trim();
-      break;
+  const nextStop = () => stops.find(x => !x.concluida) || null;
+  function openView(name, focusId = null) {
+    activeView = name;
+    for (const tab of ui.tabs) {
+      const selected = tab.dataset.view === name;
+      tab.classList.toggle('active', selected);
+      tab.setAttribute('aria-selected', String(selected));
     }
-    road = road.replace(/^\s*(?:n[º°o]?\.?\s*)?$/, '').trim();
-    return { road: road || cleaned, number, extra, postcode, raw };
+    Object.entries(ui.panels).forEach(([view, el]) => { el.hidden = view !== name; });
+    ui.title.textContent = ({entregas:'Planejar entregas', mapa:'Seu mapa de rotas', resumo:'Resultados do dia'})[name];
+    if (name === 'mapa') {
+      ensureMap();
+      requestAnimationFrame(() => { if (map) { map.resize(); updateMapSources(); if (focusId) { focusStop(focusId); } } });
+      // Resize again once browser has committed tab visibility (critical on mobile).
+      setTimeout(() => { if (map && activeView === 'mapa') map.resize(); }, 110);
+    }
   }
-  // Parsing fixture exposed for automated checks without exposing implementation to page UI.
-  window.__rotafacilTest = Object.freeze({ parseAddress, normalizeRoad, meters, getOSMAddressMatches: (...args) => getOSMAddressMatches(...args) });
+  ui.tabs.forEach(tab => tab.addEventListener('click', () => openView(tab.dataset.view)));
+  ui.openMap.addEventListener('click', () => openView('mapa'));
+  ui.toMap.addEventListener('click', () => { openView('mapa'); fitMap(); });
+  ui.summaryMap.addEventListener('click', () => openView('mapa'));
 
-  async function getJSONRemote(url, { signal, timeout = CFG.timeoutMs } = {}) {
-    const controller = new AbortController();
-    if (signal?.aborted) controller.abort();
-    const relay = () => controller.abort();
-    signal?.addEventListener('abort', relay, { once: true });
-    const timer = setTimeout(() => controller.abort(), timeout);
-    try {
-      const response = await fetch(url, { signal: controller.signal, headers: { Accept: 'application/json' } });
-      if (!response.ok) {
-        // O erro técnico fica no console; o motorista recebe mensagem compreensível.
-        const source = url.includes('photon.komoot.io') ? 'Photon' : url.includes('viacep.com.br') ? 'ViaCEP' : 'Serviço de rotas';
-        console.warn(`RotaFácil: ${source} respondeu HTTP ${response.status}`);
-        const error = new Error(`Serviço indisponível (${source}, ${response.status})`);
-        error.status = response.status;
-        error.service = source;
-        throw error;
-      }
-      return await response.json();
-    } finally { clearTimeout(timer); signal?.removeEventListener('abort', relay); }
+  async function requestJSON(url, { signal, timeout = CFG.timeout } = {}) {
+    const abort = new AbortController();
+    const cancel = () => abort.abort();
+    if (signal?.aborted) abort.abort();
+    signal?.addEventListener('abort', cancel, { once: true });
+    const timer = setTimeout(() => abort.abort(), timeout);
+    try { const r = await fetch(url, { signal: abort.signal, headers: { Accept: 'application/json' } });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      return await r.json();
+    } finally { clearTimeout(timer); signal?.removeEventListener('abort', cancel); }
   }
-  // One Photon request at a time, with a modest interval so typing doesn't flood the demo API.
-  function photonJSON(url, signal) {
-    const job = async () => {
-      if (signal?.aborted) throw new DOMException('Cancelada', 'AbortError');
-      const cooldown = Math.max(0, 1000 - (Date.now() - lastPhotonTime));
-      if (cooldown) await wait(cooldown);
-      if (signal?.aborted) throw new DOMException('Cancelada', 'AbortError');
-      lastPhotonTime = Date.now();
-      return getJSONRemote(url, { signal });
+  // Um acesso por vez ao Photon público. Nenhuma consulta a cada tecla.
+  async function photon(url, signal) {
+    const task = async () => {
+      if (signal?.aborted) throw new DOMException('Busca cancelada', 'AbortError');
+      const waitMs = Math.max(0, 1100 - (Date.now() - lastSearchAt));
+      if (waitMs) await new Promise(resolve => setTimeout(resolve, waitMs));
+      if (signal?.aborted) throw new DOMException('Busca cancelada', 'AbortError');
+      lastSearchAt = Date.now();
+      return requestJSON(url, { signal });
     };
-    const running = photonQueue.then(job, job);
-    photonQueue = running.catch(() => {});
-    return running;
+    const job = photonChain.then(task, task);
+    photonChain = job.catch(() => {});
+    return job;
   }
-  function area() { return { city: ui.city.value.trim() || 'São José dos Campos', uf: ui.state.value.trim().toUpperCase() || 'SP' }; }
-  function featureToCandidate(feature) {
-    if (!feature?.geometry?.coordinates || !Array.isArray(feature.geometry.coordinates)) return null;
-    const [lon, lat] = feature.geometry.coordinates.map(Number);
-    if (!validPoint({lat,lon})) return null;
-    const p = feature.properties || {};
-    const country = String(p.countrycode || '').toLowerCase();
-    if (country && country !== 'br') return null;
-    const road = p.street || ((p.osm_key === 'highway' || p.type === 'street') ? p.name : '') || '';
-    const city = p.city || p.town || p.locality || p.county || '';
+  function photonURL(query) {
+    const q = new URLSearchParams({q: query, limit: '8', lat: String(origin.lat), lon: String(origin.lon)});
+    return `${CFG.photon}?${q.toString()}`;
+  }
+  function isHouseMatch(found, expected) { return !!(expected && found && norm(found) === norm(expected)); }
+  function formatFeature(f, number, fallbackCity, uf, requestedRoad = '') {
+    const p = f.properties || {}, point = f.geometry?.coordinates;
+    if (!Array.isArray(point) || !isPoint({lat:point[1],lon:point[0]})) return null;
+    const road = String(p.street || p.name || p.road || '').trim();
     if (!road) return null;
-    return { road: String(road), district: String(p.district || p.suburb || p.neighbourhood || p.city_district || ''),
-      city: String(city), uf: String(p.state || ''), postcode: String(p.postcode || ''),
-      house: String(p.housenumber || ''), lat, lon, source: 'photon' };
+    const city = String(p.city || p.town || p.village || fallbackCity || '').trim();
+    const district = String(p.district || p.suburb || p.locality || '').trim();
+    const foundNumber = String(p.housenumber || '').trim();
+    const outputNumber = number || foundNumber;
+    const numberMatched = isHouseMatch(foundNumber, number) && (!requestedRoad || normRoad(road) === normRoad(requestedRoad)) && (!city || norm(city) === norm(fallbackCity));
+    const address = [road + (outputNumber ? `, ${outputNumber}` : ''), district, city, p.state || uf].filter(Boolean).join(' — ');
+    return { endereco: address, lat: Number(point[1]), lon: Number(point[0]), road, number: outputNumber,
+      city, uf, district, precision: numberMatched || (!number && foundNumber) ? 'exata' : 'aproximada' };
   }
-  function viacepToCandidate(item) {
-    if (!item || !item.logradouro || !item.localidade) return null;
-    return { road: String(item.logradouro), district: String(item.bairro || ''), city: String(item.localidade),
-      uf: String(item.uf || ''), postcode: String(item.cep || ''), house: '', lat: null, lon: null, source: 'viacep' };
-  }
-  function score(candidate, query, userArea) {
-    const street = normalizeRoad(candidate.road), typed = normalizeRoad(query.road);
-    let value = 0;
-    if (street === typed) value += 160;
-    else if (street.startsWith(typed)) value += 90;
-    else if (street.includes(typed)) value += 42;
-    else if (typed.includes(street) && street.length >= 5) value += 25;
-    if (query.number && candidate.house) value += norm(candidate.house) === norm(query.number) ? 260 : -350;
-    if (candidate.city && norm(candidate.city) !== norm(userArea.city)) value -= 120;
-    if (norm(candidate.city) === norm(userArea.city)) value += 55;
-    if (norm(candidate.district) && norm(query.extra).includes(norm(candidate.district))) value += 12;
-    if (candidate.source === 'viacep') value += 12;
-    if (candidate.lat != null) value += 8;
-    return value;
-  }
-  function formatCandidate(candidate, query, userArea) {
-    const number = query.number || candidate.house;
-    const street = `${candidate.road}${number ? `, ${number}` : ''}`;
-    const district = candidate.district ? `${candidate.district} · ` : '';
-    const city = candidate.city || userArea.city;
-    const uf = /^[A-Z]{2}$/.test(candidate.uf) ? candidate.uf : userArea.uf;
-    return { title: street, sub: `${district}${city}/${uf}${candidate.postcode ? ` · CEP ${candidate.postcode}` : ''}`,
-      address: `${street}${candidate.district ? ` — ${candidate.district}` : ''} — ${city}/${uf}`,
-      number, uf, city };
-  }
-  function mergeCandidates(a, b) {
-    const merged = new Map();
-    for (const c of [...a, ...b]) {
-      // Um imóvel com número próprio jamais pode ser fundido a um trecho genérico da rua.
-      const key = [norm(c.road), norm(c.district), norm(c.city), norm(c.house)].join('|');
-      const prev = merged.get(key);
-      if (!prev) merged.set(key, c);
-      else merged.set(key, { ...prev, ...c,
-        // ViaCEP is preferred for bairro and CEP, Photon for coordinates.
-        district: prev.source === 'viacep' ? prev.district || c.district : c.source === 'viacep' ? c.district || prev.district : prev.district || c.district,
-        postcode: prev.postcode || c.postcode,
-        lat: prev.lat ?? c.lat, lon: prev.lon ?? c.lon,
-        house: prev.house || c.house,
-        source: prev.lat != null || c.lat != null ? 'combined' : 'viacep' });
-    }
-    return [...merged.values()];
-  }
-
-  function hideSuggestions() {
-    ui.listbox.classList.add('hidden');
-    ui.input.setAttribute('aria-expanded', 'false');
-    ui.input.setAttribute('aria-activedescendant', '');
-    highlighted = -1;
-  }
-  function renderSuggestions(query, candidates, userArea, waiting = false) {
-    const ordered = candidates.filter(c => !query.number || !c.house || norm(c.house) === norm(query.number))
-      .map(c => ({ c, rank: score(c, query, userArea) })).sort((a,b) => b.rank - a.rank).slice(0, 8).map(x=>x.c);
-    currentSuggestions = ordered;
-    highlighted = -1;
-    ui.listbox.replaceChildren();
-    if (!ordered.length) {
-      const box = document.createElement('div'); box.className = 'suggestion-empty';
-      box.textContent = waiting ? 'Buscando endereços e bairros...' : 'Nenhuma sugestão encontrada. Tente incluir o bairro ou selecionar outra cidade.';
-      ui.listbox.appendChild(box);
-    }
-    ordered.forEach((candidate, index) => {
-      const info = formatCandidate(candidate, query, userArea);
-      const button = document.createElement('button');
-      button.type = 'button'; button.className = 'suggestion'; button.id = `suggestion-${index}`;
-      button.setAttribute('role', 'option'); button.setAttribute('aria-selected', 'false');
-      const icon = document.createElement('span'); icon.className = 'pin'; icon.textContent = '⌖';
-      const body = document.createElement('span');
-      const title = document.createElement('strong'); title.textContent = info.title;
-      const sub = document.createElement('small'); sub.textContent = info.sub;
-      body.append(title, sub);
-      if (query.number && candidate.house && norm(candidate.house) === norm(query.number)) {
-        const ok = document.createElement('em'); ok.className = 'verified';
-        ok.textContent = 'Número encontrado no cadastro de endereços';
-        body.appendChild(ok);
-      } else if (query.number) {
-        const warn = document.createElement('em');
-        warn.textContent = 'Número preservado · posição aproximada da rua';
-        body.appendChild(warn);
-      }
-      button.append(icon, body);
-      button.addEventListener('pointerdown', event => event.preventDefault());
-      button.addEventListener('click', () => chooseSuggestion(candidate, query, userArea));
-      ui.listbox.appendChild(button);
+  function showSuggestions(items, emptyText = '') {
+    suggestions = items; activeSuggestion = -1;
+    ui.suggest.replaceChildren();
+    items.forEach((s, i) => {
+      const btn = html('button', 'suggestion'); btn.type = 'button'; btn.setAttribute('role','option'); btn.dataset.index = i;
+      btn.append(html('strong', '', s.road + (s.number ? `, ${s.number}` : '')));
+      btn.append(html('small','',[s.district, s.city, s.uf].filter(Boolean).join(' · ') + (s.precision === 'exata' ? ' · Número identificado' : ' · Ponto aproximado')));
+      btn.addEventListener('click', () => pickSuggestion(i)); ui.suggest.append(btn);
     });
-    ui.listbox.classList.remove('hidden');
-    ui.input.setAttribute('aria-expanded', 'true');
+    if (!items.length && emptyText) ui.suggest.append(html('div','suggestion',emptyText));
+    ui.suggest.classList.toggle('hidden', !items.length && !emptyText);
+    ui.input.setAttribute('aria-expanded', String(items.length > 0));
   }
-  function chooseSuggestion(candidate, query, userArea) {
-    // Selecting a result cancels in-flight autocomplete: late responses must not reopen the menu.
-    searchSeq++;
-    clearTimeout(searchTimer);
-    searchController?.abort();
-    ui.searchLoading.classList.add('hidden');
-    const info = formatCandidate(candidate, query, userArea);
-    selected = { ...candidate, ...info, typedNumber: query.number, precision: candidate.house && norm(candidate.house) === norm(query.number) && query.number ? 'exata' : 'aproximada' };
-    ui.input.value = info.address;
-    hideSuggestions();
-    textStatus(query.number ? 'Endereço selecionado. Clique em Adicionar entrega.' : 'Endereço selecionado. Você já pode adicionar.');
+  function pickSuggestion(i) {
+    const item = suggestions[i]; if (!item) return;
+    // Prevent an older autocomplete response from replacing the chosen address.
+    requestSeq++; clearTimeout(inputTimer); requestController?.abort();
+    selectedSuggestion = {...item};
+    ui.input.value = item.endereco;
+    showSuggestions([]);
+    feedback(item.precision === 'exata' ? 'Número identificado. Pronto para adicionar.' : 'Endereço selecionado. Se a casa não estiver mapeada, a posição é aproximada.');
     ui.add.focus();
   }
-  async function getPhotonCandidates(query, userArea, signal) {
-    // Um pedido Photon por alteração de rua, sem duas buscas sequenciais que travavam
-    // o campo por segundos. O número permanece na sugestão; busca exata ocorre depois.
-    const params = new URLSearchParams({
-      q: query.road,
-      limit: '12', countrycode: 'BR',
-      lat: String(origin.lat), lon: String(origin.lon)
-    });
-    const json = await photonJSON(`${CFG.photon}/api?${params.toString()}`, signal);
-    const found = (Array.isArray(json.features) ? json.features : [])
-      .map(featureToCandidate).filter(Boolean);
-    // As sugestões precisam corresponder ao nome da rua, não um local de nome parecido.
-    return found.filter(c => {
-      const street = normalizeRoad(c.road), typed = normalizeRoad(query.road);
-      return street === typed || street.startsWith(typed) || typed.startsWith(street);
-    });
-  }
-  async function getViaCepCandidates(query, userArea, signal) {
-    const road = query.road.replace(/^(rua|avenida|av\.?|travessa|alameda|praca|praça)\s+/i,'').trim();
-    if (road.length < 3 || userArea.city.length < 3 || !/^[A-Z]{2}$/.test(userArea.uf)) return [];
-    const url = `${CFG.viaCep}/${encodeURIComponent(userArea.uf)}/${encodeURIComponent(userArea.city)}/${encodeURIComponent(road)}/json/`;
-    const data = await getJSONRemote(url, { signal, timeout: 7000 });
-    return (Array.isArray(data) ? data : []).map(viacepToCandidate).filter(Boolean);
-  }
-  async function runSearch() {
-    const query = parseAddress(ui.input.value);
-    const userArea = area();
-    if (query.road.length < 3) { hideSuggestions(); ui.searchLoading.classList.add('hidden'); return; }
-    const seq = ++searchSeq;
-    searchController?.abort();
-    const controller = new AbortController(); searchController = controller;
-    const cacheKey = `${norm(query.road)}|${norm(userArea.city)}|${userArea.uf}`;
-    if (searchCache.has(cacheKey)) {
-      renderSuggestions(query, searchCache.get(cacheKey), userArea);
-      return;
-    }
-    ui.searchLoading.classList.remove('hidden');
-    renderSuggestions(query, [], userArea, true);
-    let collected = [];
-    let success = 0;
-    const receive = candidates => {
-      if (seq !== searchSeq || controller.signal.aborted) return;
-      success++;
-      collected = mergeCandidates(collected, candidates);
-      renderSuggestions(parseAddress(ui.input.value), collected, userArea, true);
-    };
-    const requests = [getPhotonCandidates(query, userArea, controller.signal), getViaCepCandidates(query, userArea, controller.signal)];
-    await Promise.allSettled(requests.map(p => p.then(receive)));
-    if (seq !== searchSeq || controller.signal.aborted) return;
-    searchCache.set(cacheKey, collected);
-    if (searchCache.size > 70) searchCache.delete(searchCache.keys().next().value);
-    ui.searchLoading.classList.add('hidden');
-    renderSuggestions(parseAddress(ui.input.value), collected, userArea);
-    if (!collected.length && success === 0) textStatus('Os serviços de busca não responderam. Verifique a conexão e tente novamente.', true);
-    else if (!collected.length) textStatus('Não encontramos a rua. Tente acrescentar bairro ou mudar a cidade.', true);
-  }
-  function inputChange() {
-    clearTimeout(searchTimer);
-    selected = null;
-    searchSeq++;
-    searchController?.abort();
-    ui.searchLoading.classList.add('hidden');
-    const query = parseAddress(ui.input.value);
-    if (query.road.length < 3) { hideSuggestions(); textStatus('Digite pelo menos 3 letras da rua.'); return; }
-    // Invalidate previous results, but respond instantly from cache when only the house number changes.
-    const userArea = area();
-    const cacheKey = `${norm(query.road)}|${norm(userArea.city)}|${userArea.uf}`;
-    if (searchCache.has(cacheKey)) renderSuggestions(query, searchCache.get(cacheKey), userArea);
-    else { hideSuggestions(); ui.listbox.replaceChildren(); }
-    textStatus('Buscando sugestões de ruas e bairros...');
-    searchTimer = setTimeout(runSearch, CFG.debounceMs);
-  }
-  ui.input.addEventListener('input', inputChange);
-  ui.input.addEventListener('focus', () => {
-    if (selected) return;
-    const q = parseAddress(ui.input.value), a = area();
-    const key = `${norm(q.road)}|${norm(a.city)}|${a.uf}`;
-    if (searchCache.has(key)) renderSuggestions(q, searchCache.get(key), a);
-  });
-  ui.input.addEventListener('keydown', event => {
-    if (ui.listbox.classList.contains('hidden') || !currentSuggestions.length) return;
-    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
-      event.preventDefault();
-      highlighted = (highlighted + (event.key === 'ArrowDown' ? 1 : -1) + currentSuggestions.length) % currentSuggestions.length;
-      const options = [...ui.listbox.querySelectorAll('[role=option]')];
-      options.forEach((option,i) => { option.classList.toggle('active', i === highlighted); option.setAttribute('aria-selected', String(i === highlighted)); });
-      ui.input.setAttribute('aria-activedescendant', options[highlighted]?.id || '');
-      options[highlighted]?.scrollIntoView({block:'nearest'});
-    } else if (event.key === 'Enter' && highlighted >= 0) {
-      event.preventDefault(); chooseSuggestion(currentSuggestions[highlighted], parseAddress(ui.input.value), area());
-    } else if (event.key === 'Escape') { hideSuggestions(); }
-  });
-  document.addEventListener('pointerdown', event => {
-    if (!ID('address-wrap').contains(event.target)) hideSuggestions();
-  });
-  for (const input of [ui.city, ui.state]) input.addEventListener('change', () => { selected = null; inputChange(); save(); });
-
-  // ---- Leitor de endereços: um botão, captura de foto no celular e OCR local. ----
-  // Tesseract.js é carregado somente quando o usuário realmente seleciona uma imagem.
-  // O texto lido é colocado no campo existente, sem cadastrar uma entrega automaticamente.
-  let ocrLoadingPromise = null;
-  function carregarOCR() {
-    if (window.Tesseract?.recognize) return Promise.resolve();
-    if (ocrLoadingPromise) return ocrLoadingPromise;
-    ocrLoadingPromise = new Promise((resolve, reject) => {
-      const script = document.createElement('script');
-      script.src = 'https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js';
-      script.async = true;
-      script.onload = () => window.Tesseract?.recognize ? resolve() : reject(new Error('Reconhecimento de texto indisponível.'));
-      script.onerror = () => reject(new Error('Não foi possível carregar o leitor. Verifique sua internet.'));
-      document.head.appendChild(script);
-    }).catch(error => { ocrLoadingPromise = null; throw error; });
-    return ocrLoadingPromise;
-  }
-
-  function extrairEnderecoDeFoto(texto) {
-    // Primeiro uma linha contendo tipo de logradouro; só complementa com a seguinte
-    // se esta trouxer explicitamente o número ou o bairro.
-    const linhas = String(texto || '').split(/[\r\n]+/)
-      .map(p => p.replace(/\s+/g, ' ').trim()).filter(Boolean);
-    const ruaPattern = /\b(?:rua|r\.|avenida|av\.?|travessa|alameda|estrada|rodovia|praça|praca|largo|viela)\b/i;
-    const indice = linhas.findIndex(p => ruaPattern.test(p));
-    if (indice === -1) return '';
-    let endereco = linhas[indice].slice(linhas[indice].search(ruaPattern));
-    const detalhes = linhas.slice(indice + 1, indice + 3);
-    if (!parseAddress(endereco).number) {
-      const n = detalhes.find(p => /^(?:n(?:ú|u)mero|n[º°o]?\.?|#)?\s*[:.#-]?\s*\d{1,5}[A-Za-z]?\b/i.test(p));
-      if (n) endereco += ', ' + n.replace(/^(?:n(?:ú|u)mero|n[º°o]?\.?|#)\s*[:.#-]?\s*/i, '');
-    }
-    const bairro = detalhes.find(p => /\bbairro\b/i.test(p));
-    if (bairro && !endereco.toLowerCase().includes(bairro.toLowerCase())) endereco += ', ' + bairro;
-    return endereco.replace(/\s+/g, ' ').trim().slice(0, 220);
-  }
-
-  ui.scan.addEventListener('click', () => { if (!ui.scan.disabled) ui.scanFile.click(); });
-  ui.scanFile.addEventListener('change', async () => {
-    const arquivo = ui.scanFile.files?.[0];
-    if (!arquivo) return;
-    ui.scanFile.value = '';
-    if (!arquivo.type.startsWith('image/')) {
-      textStatus('Escolha uma foto ou imagem do endereço.', true); return;
-    }
-    if (arquivo.size > 12 * 1024 * 1024) {
-      textStatus('A foto é muito grande. Use uma imagem de até 12 MB.', true); return;
-    }
-    ui.scan.disabled = true;
-    ui.scanLabel.textContent = 'Lendo...';
-    textStatus('Lendo o endereço da foto...');
+  async function lookup(term, seq) {
+    if (requestController) requestController.abort();
+    requestController = new AbortController();
+    const signal = requestController.signal;
+    const city = ui.city.value.trim() || 'São José dos Campos', uf = ui.uf.value.trim().toUpperCase() || 'SP';
+    const parts = parsed(term);
+    const searchBase = `${parts.road}, ${city}, ${uf}, Brasil`;
+    const key = norm(`${searchBase}|${parts.number}`);
+    feedback('Buscando sugestões...');
     try {
-      await carregarOCR();
-      const result = await window.Tesseract.recognize(arquivo, 'por');
-      const endereco = extrairEnderecoDeFoto(result?.data?.text);
-      if (!endereco) throw new Error('Não identifiquei uma rua na foto. Tire outra foto com o endereço mais nítido.');
-      ui.input.value = endereco;
-      inputChange(); // inicia o autocompletar normal do RotaFácil
-      textStatus('Endereço lido. Confira o número e selecione uma sugestão antes de adicionar.');
-      ui.input.focus();
-    } catch (error) {
-      console.warn('Leitura da foto:', error);
-      textStatus(error.message || 'Não foi possível ler o endereço da foto.', true);
-    } finally {
-      ui.scan.disabled = false;
-      ui.scanLabel.textContent = 'Escanear';
-    }
-  });
-
-  // ---- Geocodificação por número antes de aceitar o centro da rua. ----
-  // "Exata" indica que um cadastro identificou rua + número, não que conhecemos a porta.
-  // "estimada" usa duas numerações da mesma rua e mesma paridade.
-  // "aproximada" significa que só conhecemos uma posição genérica da rua.
-  const addressCache = new Map();
-  function hasMatchingAddress(candidate,road,house,city) {
-    return validPoint(candidate) && normalizeRoad(candidate.road) === normalizeRoad(road) &&
-      norm(candidate.house) === norm(house) && (!candidate.city || !city || norm(candidate.city) === norm(city));
-  }
-  const houseDigits = value => { const m=String(value||'').trim().match(/^(\d+)(?:[a-z])?$/i); return m?Number(m[1]):null; };
-  const escapeOverpass = str => String(str).replace(/\\/g,'\\\\').replace(/"/g,'\\"');
-  const escapePattern = str => String(str).replace(/[.*+?^${}()|[\]\\]/g,'\\$&');
-
-  // Somente números documentados na MESMA rua podem dar origem à estimativa.
-  // Nunca deduzir uma localização a partir do número isolado (10, 590 etc.).
-  function getOSMAddressMatches(elements, road, house, point, city = '', district = '') {
-    const targetRoad = normalizeRoad(road);
-    const relevant = (Array.isArray(elements) ? elements : []).filter(e =>
-      normalizeRoad(e.tags?.['addr:street']) === targetRoad)
-      .map(e => ({
-        house: String(e.tags?.['addr:housenumber'] || ''),
-        lat: Number(e.lat ?? e.center?.lat), lon: Number(e.lon ?? e.center?.lon),
-        city: String(e.tags?.['addr:city'] || ''),
-        district: String(e.tags?.['addr:suburb'] || e.tags?.['addr:district'] || ''),
-        tags: e.tags || {}
-      })).filter(validPoint)
-      .filter(p => (!point || meters(p, point) <= CFG.addressLookupRadius + 200) &&
-        (!city || !p.city || norm(city) === norm(p.city)));
-    const direct = relevant.filter(p => norm(p.house) === norm(house))
-      .sort((a, b) => Number(Boolean(district && norm(a.district) === norm(district))) * -1 +
-        Number(Boolean(district && norm(b.district) === norm(district))) || meters(a, point) - meters(b, point));
-    if (direct.length) return { ...direct[0], precision: 'exata', source: 'osm-number' };
-
-    const target = houseDigits(house);
-    if (!Number.isFinite(target)) return null;
-    const sameParity = relevant.filter(p => houseDigits(p.house) !== null &&
-      houseDigits(p.house) % 2 === target % 2).sort((a,b) => houseDigits(a.house) - houseDigits(b.house));
-    const guesses = [];
-    for (let i = 0; i < sameParity.length - 1; i++) {
-      const a = sameParity[i], b = sameParity[i + 1];
-      const low = houseDigits(a.house), high = houseDigits(b.house);
-      if (low >= target || high <= target) continue;
-      const gap = high - low, length = meters(a,b);
-      // Avenida longa: permitir intervalos maiores somente com dois pontos existentes
-      // e distância física coerente, sem extrapolação fora das âncoras.
-      if (gap > 1000 || length > 1100 || length < 6 || length/gap < 0.22 || length/gap > 12) continue;
-      // Evitar estimativa que atravesse vários quarteirões sem informação.
-      if (gap > 160 && length > 650) continue;
-      if (district && a.district && b.district && norm(a.district) !== norm(b.district)) continue;
-      const t = (target - low) / gap;
-      const latitude = a.lat + (b.lat - a.lat) * t;
-      const longitude = a.lon + (b.lon - a.lon) * t;
-      guesses.push({lat: latitude, lon: longitude, precision: 'estimada', source: 'osm-interpolation',
-        gap, length, proximity: point ? Math.min(meters(a, point), meters(b, point)) : 0 });
-    }
-    guesses.sort((a,b) => a.gap-b.gap || a.length-b.length || a.proximity-b.proximity);
-    return guesses[0] || null;
-  }
-
-  async function queryOSMAddress(road, house, approximate, signal, city = '', district = '') {
-    if (!validPoint(approximate)) return null;
-    const key = `${norm(road)}|${norm(house)}|${norm(city)}|${approximate.lat.toFixed(3)}|${approximate.lon.toFixed(3)}`;
-    if (addressCache.has(key)) return addressCache.get(key);
-    const core = normalizeRoad(road);
-    if (core.length < 3) return null;
-    const regex = escapeOverpass(escapePattern(core));
-    const num = escapeOverpass(house);
-    const radius = CFG.addressLookupRadius;
-    // Endereços explicitamente numerados da mesma rua.
-    // Usar GET na versão sem servidor; falhas preservam a posição aproximada.
-    const q = `[out:json][timeout:7];(nwr(around:${radius},${approximate.lat},${approximate.lon})["addr:housenumber"="${num}"];nwr(around:${radius},${approximate.lat},${approximate.lon})["addr:street"~"${regex}",i]["addr:housenumber"];);out center 250;`;
-    const data = await getJSONRemote(`${CFG.overpass}?data=${encodeURIComponent(q)}`,
-      {signal,timeout:CFG.addressLookupTimeout});
-    const hit = getOSMAddressMatches(data.elements,road,house,approximate,city,district);
-    addressCache.set(key,hit);
-    if (addressCache.size>45) addressCache.delete(addressCache.keys().next().value);
-    return hit;
-  }
-
-  async function photonExactHouse(road,house,city,uf,signal) {
-    const params=new URLSearchParams({street:road,housenumber:String(house),city,
-      countrycode:'BR',limit:'8',lat:String(origin.lat),lon:String(origin.lon)});
-    const data=await photonJSON(`${CFG.photon}/structured?${params}`,signal);
-    const features=(data.features||[]).map(featureToCandidate).filter(Boolean);
-    return features.filter(c=>hasMatchingAddress(c,road,house,city))
-      .sort((a,b)=>meters(a,origin)-meters(b,origin))[0]||null;
-  }
-
-  async function resolveCoordinates(candidate,userArea,signal) {
-    const parsed=parseAddress(candidate.address||ui.input.value);
-    const house=String(candidate.typedNumber||candidate.number||candidate.house||parsed.number||'').trim();
-    const road=String(candidate.road||parsed.road||'').trim();
-    const city=String(candidate.city||userArea.city).trim();
-    const uf=/^[A-Z]{2}$/.test(candidate.uf||'')?candidate.uf:userArea.uf;
-    const original=validPoint(candidate)?{lat:Number(candidate.lat),lon:Number(candidate.lon)}:null;
-    if (!road)throw new Error('Digite o nome da rua.');
-
-    // Se o próprio resultado é um imóvel numerado, utilizar o ponto do imóvel.
-    if(house && hasMatchingAddress(candidate,road,house,city)) {
-      return {...original,precision:'exata',source:'photon-number'};
-    }
-
-    let reference=original;
-    if(!reference){
-      const q={road,number:house,extra:candidate.district||''};
-      const matches=await getPhotonCandidates(q,{city,uf},signal);
-      const suitable=matches.filter(c=>normalizeRoad(c.road)===normalizeRoad(road) &&
-        (!c.city||norm(c.city)===norm(city))).sort((a,b)=>score(b,q,{city,uf})-score(a,q,{city,uf}))[0];
-      if(!suitable)throw new Error('Não conseguimos posicionar essa rua. Escolha outra sugestão.');
-      reference={lat:suitable.lat,lon:suitable.lon};
-      if(house && hasMatchingAddress(suitable,road,house,city))return {...reference,precision:'exata',source:'photon-number'};
-    }
-    if(!house)return {...reference,precision:'aproximada',source:'street-reference'};
-
-    // Buscar casa mapeada antes do fallback para o ponto central da rua.
-    // As duas fontes são independentes: uma falha não impede o cadastro.
-    const jobs=[photonExactHouse(road,house,city,uf,signal).then(p=>
-      p?{lat:p.lat,lon:p.lon,precision:'exata',source:'photon-number'}:null).catch(error=>{
-        if(signal?.aborted)throw error; console.warn('Endereço por número indisponível:',error);return null;
-      }), queryOSMAddress(road,house,reference,signal,city,candidate.district||'').catch(error=>{
-        if(signal?.aborted)throw error;console.warn('Imóveis OSM indisponíveis:',error);return null;
-      })];
-    const results=await Promise.all(jobs);
-    const exact=results.find(p=>p?.precision==='exata');
-    if(exact)return exact;
-    const estimated=results.find(p=>p?.precision==='estimada');
-    return estimated||{...reference,precision:'aproximada',source:'street-reference'};
-  }
-  function stopFromCandidate(c,coordinate,fallback) {
-    const addr=c.address||c.raw||fallback;
-    return {endereco:addr,lat:coordinate.lat,lon:coordinate.lon,
-      number:c.typedNumber||c.number||c.house||parseAddress(addr).number||'',
-      city:c.city||area().city,uf:c.uf||area().uf,precision:coordinate.precision,
-      road:c.road||parseAddress(addr).road,district:c.district||'',
-      propertyLat:coordinate.lat,propertyLon:coordinate.lon,navLat:coordinate.lat,navLon:coordinate.lon,
-      locationChecked:false,roadMatched:false,accessConfirmed:false,locationSource:coordinate.source||''};
-  }
-
-  ui.form.addEventListener('submit', async event => {
-    event.preventDefault();
-    if (ui.add.disabled) return;
-    const typed = ui.input.value.trim();
-    if (typed.length < 3) { textStatus('Digite um endereço antes de adicionar.', true); ui.input.focus(); return; }
-    // Avoid accidental double click while the coordinate search is running.
-    const addressChosen = selected && selected.address === typed ? { ...selected } : null;
-    const userArea = area();
-    const parsed = parseAddress(typed);
-    const candidate = addressChosen || { road: parsed.road, typedNumber: parsed.number, number: parsed.number,
-      address: typed, city: userArea.city, uf: userArea.uf, district: parsed.extra, lat: null, lon: null };
-    const token = routeRevision;
-    const ctrl = new AbortController();
-    setBusy(ui.add, true, 'Localizando...');
-    hideSuggestions();
-    textStatus('Procurando o número da casa e a localização da rua...');
-    try {
-      // Sugestão com coordenadas: cadastro imediato, sem aguardar outra API.
-      // O número será verificado em segundo plano, sem prometer precisão fictícia.
-      const fastKnown = addressChosen && validPoint(candidate);
-      const alreadyExact = fastKnown && candidate.house && candidate.typedNumber &&
-        norm(candidate.house) === norm(candidate.typedNumber);
-      const coord = fastKnown
-        ? { lat: Number(candidate.lat), lon: Number(candidate.lon),
-            precision: alreadyExact ? 'exata' : 'aproximada',
-            source: alreadyExact ? 'photon-number' : 'street-reference' }
-        : await resolveCoordinates(candidate, userArea, ctrl.signal);
-      if (ui.input.value.trim() !== typed) throw new Error('O endereço foi alterado. Confirme novamente antes de salvar.');
-      if (token !== routeRevision) throw new Error('A rota mudou enquanto você adicionava o endereço. Tente novamente.');
-      const data = stopFromCandidate(candidate, coord, typed);
-      if (editingId) {
-        const i = stops.findIndex(p => p.id === editingId);
-        if (i < 0) throw new Error('Essa entrega não está mais na lista.');
-        stops[i] = { ...stops[i], ...data };
-      } else {
-        stops.push({ id: `${Date.now()}-${Math.random().toString(36).slice(2,8)}`, ...data, concluida: false });
+      let items = responseCache.get(key);
+      if (!items) {
+        // Search by road+number; if unavailable, search just the road.
+        let data = await photon(photonURL(parts.number ? `${parts.road} ${parts.number}, ${city}` : searchBase), signal);
+        if ((!Array.isArray(data.features) || !data.features.length) && parts.number) data = await photon(photonURL(searchBase), signal);
+        items = (data.features || []).map(f => formatFeature(f, parts.number, city, uf, parts.road)).filter(Boolean);
+        // Preserve the main road name first; Photon may return unrelated similarly named streets.
+        const targetRoad = norm(parts.road);
+        items.sort((a, b) => (norm(b.road) === targetRoad ? 1 : 0) - (norm(a.road) === targetRoad ? 1 : 0));
+        const unique = new Set();
+        items = items.filter(i => { const k = `${norm(i.road)}|${norm(i.city)}|${norm(i.district)}|${i.lat.toFixed(6)}|${i.lon.toFixed(6)}`; if (unique.has(k)) return false; unique.add(k); return true; }).slice(0,7);
+        if (responseCache.size > 70) responseCache.clear();
+        responseCache.set(key, items);
       }
-      const savedStopId = editingId || stops[stops.length - 1].id;
-      const shouldRefine = fastKnown && !alreadyExact && Boolean(data.number);
-      const wasEditing = Boolean(editingId);
-      editingId = null;
-      ui.input.value = ''; selected = null;
-      ui.add.textContent = '＋ Adicionar entrega';
-      ui.cancelEdit.classList.add('hidden');
-      searchSeq++; searchController?.abort();
-      invalidate(); drawAll(); save();
-      textStatus(wasEditing ? 'Endereço atualizado na lista.' : 'Entrega adicionada à lista.');
-      if (coord.precision !== 'exata') showToast(coord.precision==='estimada'?'Entrega adicionada com posição estimada pelo número.':'Entrega adicionada com localização aproximada da rua.');
-      if (shouldRefine) refineNumberInBackground(savedStopId, candidate, userArea);
-    } catch (error) {
-      if (error.name === 'AbortError') textStatus('A busca foi interrompida. Tente novamente.', true);
-      else if (error.status || error instanceof TypeError)
-        textStatus('Não foi possível consultar a localização agora. Escolha uma sugestão com mapa ou tente novamente.', true);
-      else textStatus(error.message || 'Não conseguimos localizar este endereço. Tente outra sugestão.', true);
-    } finally { setBusy(ui.add, false, ''); if (!editingId) ui.add.textContent = '＋ Adicionar entrega'; }
-  });
-
-  async function refineNumberInBackground(id, candidate, userArea) {
-    if (refineInProgress.has(id)) return;
-    const current = stops.find(p => p.id === id);
-    if (!current || !current.number || current.precision === 'exata' || routeValid() || started) return;
-    refineInProgress.add(id);
-    const originalAddress = current.endereco;
-    const startingRevision = routeRevision;
-    const controller = new AbortController();
-    // Refinamento opcional: o motorista não fica esperando a localização detalhada.
-    try {
-      const coord = await resolveCoordinates(candidate, userArea, controller.signal);
-      const stop = stops.find(p => p.id === id);
-      if (!stop || stop.endereco !== originalAddress || startingRevision !== routeRevision || routeValid() || started) return;
-      if (coord.precision === 'exata' || coord.precision === 'estimada') {
-        stop.lat = coord.lat; stop.lon = coord.lon;
-        stop.propertyLat = coord.lat; stop.propertyLon = coord.lon;
-        stop.navLat = coord.lat; stop.navLon = coord.lon;
-        stop.precision = coord.precision; stop.locationSource = coord.source;
-        invalidate(); save(); drawAll();
-        if (activeTab === 'mapa') showToast('A localização de uma entrega foi refinada pelo número.');
-      }
-    } catch (error) {
-      console.info('Não foi possível refinar o número; mantendo referência da rua.', error);
-    } finally { refineInProgress.delete(id); }
-  }
-
-  ui.cancelEdit.addEventListener('click', () => {
-    editingId = null; selected = null; ui.input.value = '';
-    ui.add.textContent = '＋ Adicionar entrega';
-    ui.cancelEdit.classList.add('hidden');
-    searchSeq++; searchController?.abort(); clearTimeout(searchTimer); hideSuggestions();
-    textStatus('Digite o nome da rua e o número para começar.');
-  });
-
-  // ---- Navegação por abas. O mapa só é criado quando sua aba fica visível. ----
-  const TAB_LABELS = { entregas:'Minhas entregas', mapa:'Mapa da rota', resumo:'Resumo da rota' };
-  function openTab(name, { focusTab = false } = {}) {
-    if (!Object.hasOwn(TAB_LABELS, name)) return;
-    activeTab = name;
-    ui.tabs.forEach(button => {
-      const selected = button.dataset.tab === name;
-      button.classList.toggle('active', selected);
-      button.setAttribute('aria-selected', String(selected));
-      button.tabIndex = selected ? 0 : -1;
-      if (selected && focusTab) button.focus();
-    });
-    ui.panels.forEach(panel => { panel.hidden = panel.id !== `panel-${name}`; });
-    ui.activeTabTitle.textContent = TAB_LABELS[name];
-    if (name === 'mapa') {
-      // Sem container visível, MapLibre pode calcular o tamanho errado (mapa branco).
-      requestAnimationFrame(() => {
-        if (!mapInitialized) initMap();
-        else {
-          map?.resize();
-          if (mapReady) {
-            if (!focusedStopId) fitMap();
-            else openMapCard(focusedStopId, {fly:true});
-          }
-        }
-      });
+      if (signal.aborted || seq !== requestSeq) return;
+      showSuggestions(items, items.length ? '' : 'Nenhuma sugestão. Confira a rua e a cidade.');
+      feedback(items.length ? 'Selecione um endereço na lista.' : 'Não encontramos esse endereço. Tente incluir bairro e cidade.', !items.length);
+    } catch (e) {
+      if (signal.aborted || seq !== requestSeq) return;
+      console.warn('Busca de endereços falhou:', e);
+      showSuggestions([], 'Serviço de endereços indisponível. Tente novamente.');
+      feedback('Não foi possível consultar endereços agora. Verifique a conexão.', true);
     }
-    updateJourneyUI();
-    window.scrollTo({ top: 0, behavior: 'instant' });
   }
-  ui.tabs.forEach((button, index) => {
-    button.addEventListener('click', () => openTab(button.dataset.tab));
-    button.addEventListener('keydown', event => {
-      if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
-      event.preventDefault();
-      let next = index;
-      if (event.key === 'Home') next = 0;
-      else if (event.key === 'End') next = ui.tabs.length - 1;
-      else next = (index + (event.key === 'ArrowRight' ? 1 : -1) + ui.tabs.length) % ui.tabs.length;
-      openTab(ui.tabs[next].dataset.tab, { focusTab:true });
-    });
+  function queueLookup() {
+    selectedSuggestion = null;
+    const term = ui.input.value.trim();
+    requestSeq++; clearTimeout(inputTimer); requestController?.abort();
+    if (term.length < 4) { showSuggestions([]); return; }
+    inputTimer = setTimeout(() => lookup(term, requestSeq), CFG.debounceMs);
+  }
+  ui.input.addEventListener('input', queueLookup);
+  ui.input.addEventListener('keydown', e => {
+    if (e.key === 'Escape') { showSuggestions([]); return; }
+    if (e.key === 'ArrowDown' && suggestions.length) { e.preventDefault(); activeSuggestion=(activeSuggestion+1)%suggestions.length; ui.suggest.querySelectorAll('button')[activeSuggestion]?.focus(); }
   });
-  ui.openMap.addEventListener('click', () => openTab('mapa'));
-  ui.backDeliveries.addEventListener('click', () => openTab('entregas'));
+  document.addEventListener('pointerdown', e => { if (!ui.form.contains(e.target)) showSuggestions([]); });
+  ui.city.addEventListener('change', () => { selectedSuggestion=null; requestSeq++; save(); });
+  ui.uf.addEventListener('change', () => { selectedSuggestion=null; requestSeq++; save(); });
+  ui.form.addEventListener('submit', async e => {
+    e.preventDefault();
+    const address = ui.input.value.trim();
+    if (address.length < 4) { feedback('Digite um endereço completo.', true); return; }
+    buttonBusy(ui.add, true, 'Localizando...');
+    try {
+      let found = selectedSuggestion?.endereco === address ? selectedSuggestion : null;
+      if (!found) {
+        // Submit without selecting: resolve once, then add if a result exists.
+        const p = parsed(address), city = ui.city.value.trim() || 'São José dos Campos', uf = ui.uf.value.trim().toUpperCase() || 'SP';
+        const data = await photon(photonURL(`${p.road} ${p.number}, ${city}`.trim()));
+        found = (data.features || []).map(f=>formatFeature(f,p.number,city,uf,p.road)).find(Boolean);
+        if (!found) throw new Error('Endereço não encontrado. Escolha uma sugestão da lista.');
+        found.endereco = [found.road + (p.number ? `, ${p.number}` : ''), found.district, city, uf].filter(Boolean).join(' — ');
+      }
+      if (address !== ui.input.value.trim()) throw new Error('O endereço mudou durante a busca. Selecione novamente a sugestão.');
+      if (!isPoint(found)) throw new Error('Não recebemos coordenadas válidas para esse endereço.');
+      const updated = { ...found, id: editingId || `${Date.now()}-${Math.random().toString(36).slice(2,9)}`,
+        concluida: editingId ? Boolean(stops.find(s=>s.id===editingId)?.concluida) : false,
+        notes: editingId ? (stops.find(s=>s.id===editingId)?.notes||'') : '', urgent: editingId ? Boolean(stops.find(s=>s.id===editingId)?.urgent) : false,
+        propertyLat: found.lat, propertyLon: found.lon, navLat: found.lat, navLon: found.lon,
+        accessConfirmed: false, roadMatched: false };
+      if (editingId) stops = stops.map(s=>s.id===editingId?updated:s);
+      else stops.push(updated);
+      const edited = !!editingId;
+      resetForm(); invalidate(); save(); render();
+      feedback(edited ? 'Endereço atualizado.' : 'Entrega adicionada. Você pode continuar cadastrando.');
+      toast(edited?'Endereço atualizado.':'Entrega adicionada.');
+    } catch (err) { feedback(err.message || 'Não foi possível cadastrar esse endereço.', true); }
+    finally { buttonBusy(ui.add, false); }
+  });
+  function resetForm() { editingId=null; selectedSuggestion=null; ui.input.value=''; ui.addLabel.textContent='Adicionar'; ui.editCancel.classList.add('hidden'); showSuggestions([]); }
+  ui.editCancel.addEventListener('click',()=>{resetForm();feedback('Edição cancelada.');});
 
-  // ---- Edição reutilizada pela lista e pelo cartão do mapa. ----
+  // OCR carrega apenas quando o motorista realmente seleciona uma fotografia.
+  ui.scan.addEventListener('click',()=>ui.scanFile.click());
+  let ocrLoading = null;
+  function ensureOCR() {
+    if (window.Tesseract) return Promise.resolve();
+    if (ocrLoading) return ocrLoading;
+    ocrLoading = new Promise((resolve, reject) => {
+      const s=document.createElement('script');s.src='https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js';s.async=true;
+      s.onload=resolve;s.onerror=()=>reject(new Error('Não foi possível carregar o scanner.'));
+      document.head.append(s);
+    }).catch(err=>{ocrLoading=null;throw err;});
+    return ocrLoading;
+  }
+  ui.scanFile.addEventListener('change',async()=>{
+    const image=ui.scanFile.files?.[0];ui.scanFile.value='';if(!image)return;
+    if (!image.type.startsWith('image/')) { feedback('Selecione uma foto de endereço.',true);return; }
+    const old=ui.input.value;
+    ui.scan.disabled=true;ui.scanLabel.textContent='Lendo...';feedback('Lendo o endereço da foto...');
+    try {
+      await ensureOCR();
+      const result=await window.Tesseract.recognize(image,'por+eng');
+      const lines=String(result.data?.text||'').split(/\r?\n/).map(x=>x.trim()).filter(Boolean);
+      const address=lines.find(line=>/\b(rua|avenida|av\.?|travessa|alameda|estrada|rodovia|praça)\b/i.test(line)) || lines.find(l=>/\d/.test(l)) || lines[0];
+      if (!address) throw new Error('Não identifiquei um endereço na fotografia.');
+      ui.input.value=address.slice(0,200);queueLookup();feedback('Texto lido. Confira o número e escolha a sugestão.');
+    } catch(err){ui.input.value=old;feedback(err.message||'Não foi possível ler a foto.',true);}
+    finally {ui.scan.disabled=false;ui.scanLabel.textContent='Escanear';}
+  });
+
   function editStop(id) {
-    const stop = stops.find(p => p.id === id);
-    if (!stop) return;
-    editingId = id;
-    selected = null;
-    ui.input.value = stop.endereco;
-    ui.add.textContent = '✓ Salvar edição';
-    ui.cancelEdit.classList.remove('hidden');
-    openTab('entregas');
-    textStatus('Edite o endereço, escolha a sugestão correta e clique em Salvar edição.');
-    inputChange();
-    requestAnimationFrame(() => {
-      ui.input.scrollIntoView({ behavior:'smooth', block:'center' });
-      ui.input.focus();
-    });
+    const stop=stops.find(s=>s.id===id);if(!stop)return;
+    editingId=id;selectedSuggestion={...stop};ui.input.value=stop.endereco;
+    ui.addLabel.textContent='Salvar edição';ui.editCancel.classList.remove('hidden');feedback('Corrija o endereço e clique em Salvar edição.');
+    openView('entregas');ui.input.focus();ui.input.scrollIntoView({behavior:'smooth',block:'center'});
   }
   function toggleDone(id) {
-    const stop = stops.find(p => p.id === id);
-    if (!stop) return;
-    const hadPlan = routeValid();
-    stop.concluida = !stop.concluida;
-    if (!started || !hadPlan) invalidate();
-    else { planned.signature = signature(); activeArrivalId = null; }
-    ui.arrived.classList.add('hidden');
-    save(); drawAll();
+    stops = stops.map(p => p.id === id ? {...p, concluida: !p.concluida} : p);
+    arrivalNotified=null;save();render();
+    if (stops.every(p=>p.concluida) && stops.length) toast('Todas as entregas foram concluídas!');
+    else toast('Entrega atualizada.');
   }
-
-  // ---- Cartão flutuante de pino e agrupamento de localizações sobrepostas. ----
-  function closeMapCard() {
-    focusedStopId = null;
-    focusedGroupKey = null;
-    ui.mapFloat.classList.add('hidden');
-    ui.mapHint.classList.remove('hidden');
-    updateJourneyUI();
-    markers.forEach(item => item.element.classList.remove('is-selected'));
+  function removeStop(id) {
+    const s=stops.find(p=>p.id===id);if(!s)return;
+    if(!confirm(`Excluir a entrega: ${s.endereco}?`))return;
+    stops=stops.filter(p=>p.id!==id);if(editingId===id)resetForm();
+    invalidate(); save();render();
   }
-  function selectPinMarker(stopId, key = null) {
-    markers.forEach(item => item.element.classList.toggle('is-selected',
-      key ? item.key === key : item.stopId === stopId));
-  }
-  function openMapCard(id, { fly = false } = {}) {
-    const stop = stops.find(item => item.id === id);
-    if (!stop) { closeMapCard(); return; }
-    focusedStopId = id;
-    focusedGroupKey = null;
-    const index = stops.findIndex(item => item.id === id);
-    ui.mapFloatLabel.textContent = `PARADA ${String(index+1).padStart(2,'0')}`;
-    ui.mapFloatStatus.textContent = stop.concluida ? 'Concluída' : 'Pendente';
-    ui.mapFloatAddress.textContent = stop.endereco;
-    const precision = stop.precision === 'exata' ? 'Número identificado' : stop.precision === 'estimada' ?
-      'Número estimado: confira ao chegar' : 'Ponto aproximado da rua';
-    ui.mapFloatDetail.textContent = precision;
-    ui.mapFloatNavigate.href = locationURL(stop);
-    ui.mapFloatDone.textContent = stop.concluida ? '↶ Desfazer' : '✓ Entregue';
-    ui.mapFloatDone.onclick = () => toggleDone(id);
-    ui.mapFloatEdit.onclick = () => editStop(id);
-    ui.mapFloatChoices.classList.add('hidden');
-    ui.mapFloatChoices.replaceChildren();
-    ui.mapFloatActions.classList.remove('hidden');
-    ui.mapFloat.classList.remove('hidden');
-    ui.mapHint.classList.add('hidden');
-    updateJourneyUI();
-    selectPinMarker(id);
-    if (fly && mapReady) map.easeTo({ center:(() => {const p=displayPoint(stop);return [p.lon,p.lat];})(), zoom:Math.max(15, map.getZoom()), offset:[0,-90], duration:420 });
-  }
-  function openMapGroup(group, key) {
-    focusedStopId = null;
-    focusedGroupKey = key;
-    ui.mapFloatLabel.textContent = 'PONTO COMPARTILHADO';
-    ui.mapFloatStatus.textContent = `${group.length} entregas`;
-    ui.mapFloatAddress.textContent = `${group.length} endereços neste ponto`;
-    ui.mapFloatDetail.textContent = 'A base de mapas não distingue os números. Escolha um endereço para navegar pelo texto completo.';
-    ui.mapFloatChoices.replaceChildren();
-    group.forEach(stop => {
-      const item = document.createElement('button');
-      item.type = 'button';
-      item.textContent = stop.endereco;
-      item.addEventListener('click', () => openMapCard(stop.id));
-      ui.mapFloatChoices.appendChild(item);
+  function listButton(label,fn,cls='') { const b=html('button',cls,label);b.type='button';b.addEventListener('click',fn);return b; }
+  function listLink(label, url) { const a=html('a','',label);a.href=url;a.target='_blank';a.rel='noopener noreferrer';return a; }
+  function renderList() {
+    ui.list.replaceChildren();
+    const coincident = new Map();
+    stops.forEach(s => { const key=`${s.lat.toFixed(6)}:${s.lon.toFixed(6)}`; coincident.set(key,(coincident.get(key)||0)+1); });
+    const next=started?nextStop():null;
+    if(!stops.length) ui.list.append(html('div','empty-state','Sua lista está vazia. Digite uma rua e adicione a primeira parada.'));
+    stops.forEach((s,i)=>{
+      const card=html('article',`stop-card${s.concluida?' complete':''}${next?.id===s.id?' is-next':''}`);
+      card.append(html('span','stop-num',String(i+1)));
+      const body=html('div','stop-body');body.append(html('strong','',s.endereco));
+      body.append(html('small','',s.concluida?'Concluída':s.precision==='exata'?'Ponto com número identificado':'Posição aproximada — confirme na navegação'));
+      if (coincident.get(`${s.lat.toFixed(6)}:${s.lon.toFixed(6)}`)>1) body.append(html('small','warn','⚠ Este ponto é compartilhado com outra entrega. O número não foi confirmado.')); 
+      const actions=html('div','stop-actions');
+      actions.append(listButton('⌖ Mapa',()=>openView('mapa',s.id)),listLink('↗ Navegar',navLink(s)),listButton(s.concluida?'↶ Desfazer':'✓ Entregue',()=>toggleDone(s.id),'done-button'),listButton('✎ Editar',()=>editStop(s.id)),listButton('×',()=>removeStop(s.id),'del-button'));
+      card.append(body,actions);ui.list.append(card);
     });
-    ui.mapFloatChoices.classList.remove('hidden');
-    ui.mapFloatActions.classList.add('hidden');
-    ui.mapFloat.classList.remove('hidden');
-    ui.mapHint.classList.add('hidden');
-    updateJourneyUI();
-    selectPinMarker(null, key);
   }
-  ui.mapFloatClose.addEventListener('click', closeMapCard);
+  ui.clearComplete.addEventListener('click',()=>{if(!stops.some(p=>p.concluida)){toast('Não há entregas concluídas.');return;}if(!confirm('Remover todas as entregas concluídas?'))return;stops=stops.filter(p=>!p.concluida);invalidate();save();render();});
+  ui.clearAll.addEventListener('click',()=>{if(!stops.length)return;if(!confirm('Apagar todas as entregas da lista?'))return;stops=[];resetForm();invalidate();closeCard();save();render();});
 
-  // ---- Map. Map errors must never stop address entry. ----
-  function initMap() {
-    if (mapInitialized) return;
-    if (!window.maplibregl) {
-      ui.mapPlaceholder.classList.remove('hidden');
-      ui.mapStatus.textContent = 'Mapa temporariamente indisponível.';
-      return;
-    }
-    try {
-      map = new maplibregl.Map({ container: ui.map, style: CFG.mapStyle,
-        center: [origin.lon, origin.lat], zoom: 12.8, attributionControl: true });
-      mapInitialized = true;
-      // ResizeObserver keeps the canvas and marker positions synchronized with
-      // responsive layout changes; it is scoped to this single map instance.
-      if ('ResizeObserver' in window) {
-        mapSizeObserver?.disconnect();
-        mapSizeObserver = new ResizeObserver(() => {
-          if (activeTab === 'mapa' && map) map.resize();
-        });
-        mapSizeObserver.observe(ui.map);
-      }
-      map.addControl(new maplibregl.NavigationControl({ showCompass:false }), 'bottom-right');
-      map.on('load', () => {
-        mapReady = true;
-        map.resize();
-        map.addSource('route-line', { type:'geojson', data:{ type:'FeatureCollection',features:[] } });
-        map.addLayer({id:'route-casing',source:'route-line',type:'line',layout:{'line-cap':'round','line-join':'round'},paint:{'line-color':'#ffffff','line-width':9,'line-opacity':.95}});
-        map.addLayer({id:'route-stroke',source:'route-line',type:'line',layout:{'line-cap':'round','line-join':'round'},paint:{'line-color':'#16866a','line-width':5.5,'line-opacity':1}});
-        drawMap();
-        fitMap();
-      });
-      map.on('click', () => closeMapCard());
-      map.on('error', event => {
-        console.warn('Mapa:', event.error);
-        if (!mapReady) { ui.mapStatus.textContent='Mapa temporariamente indisponível.';ui.mapPlaceholder.classList.remove('hidden'); }
-      });
-    } catch (error) {
-      console.warn('Mapa indisponível:',error);
-      mapInitialized = false;
-      ui.mapPlaceholder.classList.remove('hidden');
-    }
+  function matrixGeo(points) { return points.map(a => points.map(b => meters(a,b))); }
+  async function matrixRoad(points) {
+    const coords=points.map(p=>`${p.lon},${p.lat}`).join(';');
+    const d=await requestJSON(`${CFG.osrm}/table/v1/driving/${coords}?annotations=duration`,{timeout:17000});
+    if(d.code!=='Ok'||!Array.isArray(d.durations))throw new Error('Matriz rodoviária indisponível');
+    return d.durations;
   }
-  function createMarker(label, type, lng, lat, onClick, stopId = null, key = null) {
-    // MapLibre atualiza a posição deste wrapper. O CSS só estiliza o botão interno.
-    // Assim animação/rotação do desenho não altera a âncora geográfica.
-    const anchor = document.createElement('div');
-    anchor.className = 'map-marker-anchor';
-    const visual = document.createElement('button');
-    visual.type = 'button';
-    visual.className = `map-pin ${type}`;
-    visual.setAttribute('aria-label', 'Abrir detalhes: ' + label);
-    const text = document.createElement('span'); text.className='pin-label'; text.textContent=label;
-    visual.appendChild(text);
-    visual.addEventListener('click', event => { event.stopPropagation(); onClick(); });
-    anchor.appendChild(visual);
-    const marker = new maplibregl.Marker({ element: anchor, anchor: 'bottom', offset: [0, 0] })
-      .setLngLat([lng,lat]).addTo(map);
-    markers.push({marker,element:visual,stopId,key});
-  }
-  // A coordenada original do endereço fica intacta. Se o endereço é apenas uma
-  // referência de rua e o encaixe foi CONFIRMADO pelo nome da via, exibir na via.
-  function displayPoint(stop) {
-    return stop.precision === 'aproximada' && stop.roadMatched === true &&
-      validPoint({lat:stop.navLat,lon:stop.navLon})
-      ? {lat:Number(stop.navLat),lon:Number(stop.navLon)}
-      : {lat:Number(stop.lat),lon:Number(stop.lon)};
-  }
-  function fitMap() {
-    if (!mapReady) return;
-    const points = [[origin.lon,origin.lat],...stops.map(p=>{const pt=displayPoint(p);return [pt.lon,pt.lat];})];
-    if (!points.length) return;
-    if (points.length === 1) { map.easeTo({center:points[0], zoom:14}); return; }
-    const bounds = new maplibregl.LngLatBounds(points[0], points[0]);
-    points.slice(1).forEach(p=>bounds.extend(p));
-    map.fitBounds(bounds, {padding:{top:75,bottom:routeValid()?180:55,left:55,right:55},maxZoom:15,duration:450});
-  }
-  function duplicateLocations() {
-    const byPoint = new Map();
-    stops.forEach(stop => {
-      if (stop.concluida || stop.precision !== 'aproximada') return;
-      // cerca de 3 metros: referência genérica compartilhada, não imóvel confirmado.
-      const point=displayPoint(stop);
-      const key = `${point.lat.toFixed(5)}|${point.lon.toFixed(5)}`;
-      const group = byPoint.get(key) || [];
-      group.push(stop);
-      byPoint.set(key, group);
-    });
-    return [...byPoint.values()].filter(group => group.length > 1 &&
-      group.some(p => String(p.number || '')) && new Set(group.map(p => p.number)).size > 1);
-  }
-  function coincidentStopIds() {
-    return new Set(duplicateLocations().flatMap(group => group.map(p => p.id)));
-  }
-
-  function drawMap() {
-    if (!mapReady) return;
-    markers.forEach(item=>item.marker.remove());
-    markers=[];
-    createMarker('⌂','origin',origin.lon,origin.lat,()=> {
-      focusedStopId = null;
-      ui.mapFloatLabel.textContent = 'PONTO DE PARTIDA';
-      ui.mapFloatStatus.textContent = 'Origem';
-      ui.mapFloatAddress.textContent = origin.endereco;
-      ui.mapFloatDetail.textContent = 'A rota é calculada a partir desta localização.';
-      ui.mapFloatChoices.classList.add('hidden');
-      ui.mapFloatActions.classList.add('hidden');
-      ui.mapFloat.classList.remove('hidden');
-      ui.mapHint.classList.add('hidden');
-    });
-    const next = started ? stops.find(p=>!p.concluida) : null;
-    const groups = new Map();
-    stops.forEach(stop => {
-      // Agrupar coordenadas idênticas evita que um pino esconda outro sem inventar posições.
-      const point=displayPoint(stop);
-      const key = `${point.lat.toFixed(5)}|${point.lon.toFixed(5)}`;
-      if (!groups.has(key)) groups.set(key, []);
-      groups.get(key).push(stop);
-    });
-    groups.forEach((group,key) => {
-      const p = group[0];
-      const point=displayPoint(p);
-      if (group.length > 1) {
-        createMarker(String(group.length),'group',point.lon,point.lat,()=>openMapGroup(group,key),null,key);
-      } else {
-        const i = stops.findIndex(stop=>stop.id===p.id);
-        createMarker(String(i+1), p.concluida?'done':next?.id===p.id?'next':p.precision!=='exata'?'uncertain':'',
-          point.lon,point.lat,()=>openMapCard(p.id),p.id);
-      }
-    });
-    const line = routeValid() ? planned.geometry : null;
-    const feature = line && line.length > 1 ? {type:'Feature',properties:{},geometry:{type:'LineString',coordinates:line}} : null;
-    map.getSource('route-line')?.setData({type:'FeatureCollection',features:feature?[feature]:[]});
-    // Linha sempre sólida, seguindo as ruas quando há geometria OSRM.
-    // Nunca adicionar line-dasharray (o tracejado anterior confundia usuários).
-    if (focusedStopId) openMapCard(focusedStopId);
-    else if (focusedGroupKey && groups.has(focusedGroupKey) && groups.get(focusedGroupKey).length>1)
-      openMapGroup(groups.get(focusedGroupKey),focusedGroupKey);
-    else if (focusedGroupKey) closeMapCard();
-    if (gpsFix) displayGps();
-  }
-  ui.fit.addEventListener('click', fitMap);
-
-  // ---- GPS position. Geofence arrival is informational; delivery is never marked automatically. ----
-  function displayGps() {
-    if (!gpsFix || !mapReady) return;
-    if (!gpsMarker) {
-      const node = document.createElement('div'); node.className = 'gps-marker';
-      gpsMarker = new maplibregl.Marker({element:node}).setLngLat([gpsFix.lon,gpsFix.lat]).addTo(map);
-    } else gpsMarker.setLngLat([gpsFix.lon,gpsFix.lat]);
-    ui.gpsMessage.textContent = `◎ GPS ativo · precisão aproximada ±${Math.round(gpsFix.accuracy)} m`;
-    const target = stops.find(p=>!p.concluida);
-    if (started && target && target.accessConfirmed === true && gpsFix.accuracy <= 10 && meters(gpsFix,navigationPoint(target)) <= 10) {
-      if (activeArrivalId !== target.id) {
-        activeArrivalId = target.id;
-        ui.arrived.textContent = 'Você chegou perto do destino. Confirme a entrega ao finalizar.';
-        ui.arrived.classList.remove('hidden');
-        showToast('Destino próximo: confira o local de entrega.');
-      }
-    }
-  }
-  function stopGPS() {
-    if (gpsWatchId !== null) navigator.geolocation.clearWatch(gpsWatchId);
-    gpsWatchId = null; clearInterval(gpsVisualTimer); gpsVisualTimer = null;
-    gpsMarker?.remove(); gpsMarker = null; gpsFix = null;
-    ui.gps.textContent = '◎ GPS ao vivo'; ui.gps.setAttribute('aria-pressed','false'); ui.gps.classList.remove('active');
-    ui.gpsMessage.textContent = '● Origem    ● Entregas    ● GPS';
-  }
-  ui.gps.addEventListener('click', () => {
-    if (gpsWatchId !== null) { stopGPS(); return; }
-    if (!navigator.geolocation) { showToast('GPS não disponível neste navegador.'); return; }
-    if (!window.isSecureContext) { showToast('Para usar GPS, abra por HTTPS ou localhost.'); return; }
-    ui.gps.textContent = '◎ Ligando GPS...';
-    gpsWatchId = navigator.geolocation.watchPosition(position => {
-      gpsFix = {lat:position.coords.latitude,lon:position.coords.longitude,accuracy:Number.isFinite(position.coords.accuracy) ? position.coords.accuracy : Infinity};
-      displayGps();
-    }, error => {
-      showToast(error.code===1?'Autorize a localização no navegador.':'Não conseguimos obter seu GPS.');
-      stopGPS();
-    }, {enableHighAccuracy:true,maximumAge:5000,timeout:17000});
-    ui.gps.textContent='● GPS ligado'; ui.gps.classList.add('active'); ui.gps.setAttribute('aria-pressed','true');
-    gpsVisualTimer = setInterval(displayGps, 5000);
-  });
-  window.addEventListener('pagehide', () => { stopGPS(); mapSizeObserver?.disconnect(); });
-
-  // ---- Origin ----
-  ui.originInput.value = origin.personalizado ? origin.endereco : '';
-  ui.originLabel.textContent = origin.personalizado ? origin.endereco : 'São José dos Campos, SP';
-  ui.originBtn.addEventListener('click', async () => {
-    const typed = ui.originInput.value.trim();
-    if (!typed) { ui.originStatus.textContent='Digite uma origem para continuar.'; return; }
-    setBusy(ui.originBtn,true,'Buscando...');
-    try {
-      const query = parseAddress(typed), a = area();
-      const hits = await getPhotonCandidates(query,a);
-      const selectedOrigin = hits.sort((x,y)=>score(y,query,a)-score(x,query,a))[0];
-      if (!selectedOrigin) throw new Error('Não foi possível localizar esta origem.');
-      origin = { endereco:typed,lat:selectedOrigin.lat,lon:selectedOrigin.lon,personalizado:true };
-      ui.originLabel.textContent = typed;
-      ui.originStatus.textContent = 'Ponto de partida atualizado.';
-      invalidate(); drawAll(); save(); fitMap();
-    } catch (error) { ui.originStatus.textContent = error.message || 'Não foi possível localizar a origem.'; }
-    finally { setBusy(ui.originBtn,false,''); }
-  });
-  ui.originGPS.addEventListener('click', () => {
-    if (!navigator.geolocation || !window.isSecureContext) { ui.originStatus.textContent='GPS requer HTTPS ou localhost.';return; }
-    navigator.geolocation.getCurrentPosition(position => {
-      origin={ endereco:'Minha localização atual',lat:position.coords.latitude,lon:position.coords.longitude,personalizado:true };
-      ui.originInput.value=origin.endereco;ui.originLabel.textContent='Localização atual';
-      ui.originStatus.textContent='Origem definida pelo GPS.';invalidate();drawAll();save();fitMap();
-    },()=>{ui.originStatus.textContent='GPS indisponível. Verifique a permissão.';},{enableHighAccuracy:true,timeout:15000});
-  });
-
-  // ---- Última milha: pino no imóvel; navegação na rua, se identificada. ----
-  async function snapToNamedRoad(point,street) {
-    if(!validPoint(point)||!street)return null;
-    const cacheKey=`${normalizeRoad(street)}:${point.lat.toFixed(4)}:${point.lon.toFixed(4)}`;
-    if(roadSnapCache.has(cacheKey))return roadSnapCache.get(cacheKey);
-    try {
-      const url=`${CFG.osrm}/nearest/v1/driving/${point.lon},${point.lat}?number=8`;
-      const data=await getJSONRemote(url,{timeout:4200});
-      if(data.code!=='Ok'||!Array.isArray(data.waypoints))return null;
-      const valid=data.waypoints.filter(w=>Array.isArray(w.location)&&
-        normalizeRoad(w.name)===normalizeRoad(street)&&Number(w.distance)<=90)
-        .sort((a,b)=>a.distance-b.distance);
-      if(!valid.length)return null;
-      const road={lat:valid[0].location[1],lon:valid[0].location[0]};
-      roadSnapCache.set(cacheKey,road);
-      if(roadSnapCache.size>70)roadSnapCache.delete(roadSnapCache.keys().next().value);
-      return road;
-    }catch(error){console.warn('Ponto viário indisponível:',error);return null;}
-  }
-  async function improvePendingLocations(list,snapshot) {
-    const eligible=list.filter(stop=>stop.road&&!stop.locationChecked).slice(0,CFG.maxAddressChecks);
-    // limitar solicitações ao serviço público de rotas e não sobrecarregá-lo
-    for(const stop of eligible){
-      if(routeRevision!==snapshot)return;
-      const place={lat:stop.propertyLat??stop.lat,lon:stop.propertyLon??stop.lon};
-      const road=await snapToNamedRoad(place,stop.road);
-      if(routeRevision!==snapshot)return;
-      const current=stops.find(s=>s.id===stop.id);
-      if(!current)continue;
-      current.navLat=road?road.lat:place.lat;
-      current.navLon=road?road.lon:place.lon;
-      // Para referência genérica de rua, alinhar o pino ao trecho com nome confirmado.
-      // Para imóvel numerado, preservar o pino no próprio imóvel.
-      current.roadMatched=Boolean(road);
-      current.locationChecked=true;
-      current.accessConfirmed=Boolean(road&&stop.precision==='exata');
-      // Nunca mover a posição lat/lon do pino do imóvel para a rua.
-    }
-    save();drawAll();
-  }
-  const navigationPoint=p=>({lat:p.navLat??p.lat,lon:p.navLon??p.lon});
-
-  // ---- Route optimizer: road durations → nearest-neighbor + 2-opt; geographic fallback. ----
-  function greedy(points, matrix) {
-    const remaining = points.map((_,i)=>i+1);const result=[];let current=0;
-    while (remaining.length) {
-      let pick=0, best=Infinity;
-      remaining.forEach((id,i)=>{ const value=matrix[current]?.[id];if(Number.isFinite(value)&&value<best){best=value;pick=i;} });
-      current=remaining.splice(pick,1)[0];result.push(current);
-    }
-    return result;
-  }
-  function routeCost(indices, matrix) {
-    let total=0, prev=0;
-    for (const idx of indices) { const val=matrix[prev]?.[idx];total+=Number.isFinite(val)?val:1e10;prev=idx; }
-    return total;
-  }
-  function refine2Opt(initial, matrix) {
-    let best=[...initial];let bestCost=routeCost(best,matrix), improved=true, passes=0;
-    while(improved && passes++<6){improved=false;
-      for(let i=0;i<best.length-1;i++) for(let j=i+1;j<best.length;j++) {
-        const test=[...best.slice(0,i),...best.slice(i,j+1).reverse(),...best.slice(j+1)];
-        const cost=routeCost(test,matrix);
-        if(cost+0.000001<bestCost){best=test;bestCost=cost;improved=true;}
-      }
-    }
+  function cost(order,matrix){let sum=0,p=0;for(const i of order){sum+=Number.isFinite(matrix[p]?.[i])?matrix[p][i]:1e10;p=i;}return sum;}
+  function orderRoute(matrix,n){const remaining=Array.from({length:n},(_,i)=>i+1);const order=[];let current=0;
+    while(remaining.length){let best=0,min=Infinity;remaining.forEach((j,i)=>{let d=matrix[current]?.[j];if(Number.isFinite(d)&&d<min){min=d;best=i;}});current=remaining.splice(best,1)[0];order.push(current);}
+    let best=order,bestScore=cost(best,matrix),improving=true,pass=0;
+    while(improving && pass++<5){improving=false;for(let i=0;i<best.length-1;i++)for(let j=i+1;j<best.length;j++){const candidate=[...best.slice(0,i),...best.slice(i,j+1).reverse(),...best.slice(j+1)];const score=cost(candidate,matrix);if(score+1e-9<bestScore){best=candidate;bestScore=score;improving=true;}}}
     return best;
   }
-  function distanceMatrix(points) {
-    return points.map(a=>points.map(b=>meters(a,b)));
-  }
-  async function getRoadMatrix(points) {
+  async function routeRoad(points) {
     const coords=points.map(p=>`${p.lon},${p.lat}`).join(';');
-    const url=`${CFG.osrm}/table/v1/driving/${coords}?annotations=duration`;
-    const data=await getJSONRemote(url,{timeout:16000});
-    if(data.code!=='Ok'||!Array.isArray(data.durations))throw new Error('Matriz de ruas indisponível');
-    return data.durations;
+    const d=await requestJSON(`${CFG.osrm}/route/v1/driving/${coords}?overview=full&geometries=geojson&steps=false`,{timeout:18000});
+    if(d.code!=='Ok'||!d.routes?.[0]?.geometry?.coordinates)throw new Error('Traçado não encontrado');
+    return d.routes[0];
   }
-  async function getRoadPolyline(points) {
-    const coords=points.map(p=>`${p.lon},${p.lat}`).join(';');
-    const url=`${CFG.osrm}/route/v1/driving/${coords}?overview=full&geometries=geojson&steps=false`;
-    const data=await getJSONRemote(url,{timeout:18000});
-    if(data.code!=='Ok'||!data.routes?.[0]?.geometry?.coordinates)throw new Error('Percurso indisponível');
-    return { ...data.routes[0], waypoints: Array.isArray(data.waypoints) ? data.waypoints : [] };
-  }
-  function orderPending(ids) {
-    const order=new Map(ids.map((p,i)=>[p.id,i]));
-    const complete=stops.filter(p=>p.concluida);
-    const pending=stops.filter(p=>!p.concluida).sort((a,b)=>order.get(a.id)-order.get(b.id));
-    stops=[...complete,...pending];
-  }
-  ui.optimize.addEventListener('click', async () => {
-    if(optimizing) return;
-    const pending=stops.filter(p=>!p.concluida);
-    if(!pending.length){showToast('Adicione pelo menos uma entrega pendente.');return;}
-    const snapshot=routeRevision;
-    optimizing=true;setBusy(ui.optimize,true,'Otimizando...');ui.start.disabled=true;
-    ui.heroNotice.textContent='Calculando a sequência das entregas...';
+  ui.optimize.addEventListener('click',async()=>{
+    if(working)return;
+    const pending=stops.filter(s=>!s.concluida);
+    if(!pending.length){toast('Cadastre uma entrega pendente para otimizar.');return;}
+    const oldRevision=revision, startingSignature=fingerprint();
+    working=true;buttonBusy(ui.optimize,true,'Calculando...');renderActions();
+    let newOrder=null;
     try{
-      await improvePendingLocations(pending,snapshot);
-      if (snapshot!==routeRevision) return;
-      const points=[origin,...pending.map(navigationPoint)];
-      let matrix, matrixApproximate=false;
-      try { matrix=points.length-1<=CFG.maxStopsForRoadMatrix ? await getRoadMatrix(points) : distanceMatrix(points);matrixApproximate=points.length-1>CFG.maxStopsForRoadMatrix; }
-      catch (error){console.warn('Distâncias por ruas indisponíveis:',error);matrix=distanceMatrix(points);matrixApproximate=true;}
-      if(snapshot!==routeRevision) return;
-      const best=refine2Opt(greedy(pending,matrix),matrix);
-      const ordered=best.map(i=>pending[i-1]);
-      let route=null;
-      if(ordered.length<=CFG.maxStopsForRoadMatrix) {
-        try{route=await getRoadPolyline([origin,...ordered.map(navigationPoint)]);}catch(error){console.warn('Traçado por ruas indisponível:',error);}
-      }
-      if(snapshot!==routeRevision) return;
-      // OSRM pode devolver a posição real usada na malha viária para cada destino.
-      // Só alinhar pinos aproximados quando a rua retornada tem o mesmo nome e
-      // a posição está a até 80 m da referência anterior. Nunca fingir número exato.
-      if (Array.isArray(route?.waypoints) && route.waypoints.length === ordered.length + 1) {
-        ordered.forEach((stop,index) => {
-          const waypoint=route.waypoints[index+1];
-          if (stop.precision !== 'aproximada' || !stop.road || !Array.isArray(waypoint?.location)) return;
-          if (normalizeRoad(waypoint.name) !== normalizeRoad(stop.road)) return;
-          const aligned={lat:Number(waypoint.location[1]),lon:Number(waypoint.location[0])};
-          if (!validPoint(aligned) || meters(stop,aligned)>80) return;
-          // Ponto de navegação na rua, sem mover a localização original do imóvel.
-          stop.navLat=aligned.lat;stop.navLon=aligned.lon;
-          stop.roadMatched=true;stop.locationChecked=true;
-        });
-      }
-      orderPending(ordered);
-      const pointsOrdered=[origin,...ordered.map(navigationPoint)];
-      const approxKm=pointsOrdered.slice(1).reduce((sum,p,i)=>sum+meters(pointsOrdered[i],p),0)*1.25/1000;
-      const km=route ? route.distance/1000 : approxKm;
-      const mins=route ? Math.ceil(route.duration/60) : Math.ceil(approxKm/28*60);
-      const geometry=route ? route.geometry.coordinates : pointsOrdered.map(p=>[p.lon,p.lat]);
-      planned={signature:signature(),order:ordered.map(p=>p.id),km,mins,geometry,
-        approximate:matrixApproximate||!route||ordered.some(p=>p.precision!=='exata'), roadLine:Boolean(route)};
-      started=false;save();drawAll();fitMap();
-      showToast(route?'Rota calculada. Agora você pode começar as entregas.':'Ordem calculada, mas o percurso está aproximado.');
-    } catch(error) { ui.heroNotice.textContent='Não foi possível otimizar agora. Tente novamente.';showToast(error.message||'Erro ao otimizar.'); }
-    finally{optimizing=false;setBusy(ui.optimize,false,'');drawAll();}
+      const coords=[origin,...pending.map(p=>({lat:p.navLat,lon:p.navLon}))];
+      let matrix,roadMatrix=true;
+      try{matrix=pending.length<=CFG.maxTable?await matrixRoad(coords):matrixGeo(coords);roadMatrix=pending.length<=CFG.maxTable;}
+      catch(e){console.warn('Matriz por ruas não disponível:',e);matrix=matrixGeo(coords);roadMatrix=false;}
+      if(oldRevision!==revision||startingSignature!==fingerprint())return;
+      newOrder=orderRoute(matrix,pending.length).map(i=>pending[i-1]);
+      const routePoints=[origin,...newOrder.map(p=>({lat:p.navLat,lon:p.navLon}))];
+      let road=null;
+      if(newOrder.length<=CFG.maxTable){try{road=await routeRoad(routePoints);}catch(e){console.warn('Rota viária indisponível:',e);}}
+      if(oldRevision!==revision||startingSignature!==fingerprint())return;
+      const complete=stops.filter(s=>s.concluida);
+      stops=[...complete,...newOrder];
+      const estimatedMeters=routePoints.slice(1).reduce((sum,p,i)=>sum+meters(routePoints[i],p),0)*1.3;
+      const km=road ? Number(road.distance)/1000 : estimatedMeters/1000;
+      const mins=road ? Math.ceil(Number(road.duration)/60):Math.ceil(km/30*60);
+      const geometry=road?.geometry?.coordinates || routePoints.map(p=>[p.lon,p.lat]);
+      plan={signature:fingerprint(),order:newOrder.map(p=>p.id),km,mins,geometry,roadLine:!!road,approximate:!roadMatrix||!road||newOrder.some(p=>p.precision!=='exata')};
+      started=false;save();render();toast(road?'Rota calculada. Abra o mapa para conferir.':'Ordem calculada com estimativa de distância.');
+    }catch(err){console.error(err);toast('Não foi possível otimizar agora. Tente novamente.');}
+    finally{working=false;buttonBusy(ui.optimize,false);renderActions();}
   });
-  ui.start.addEventListener('click',()=>{
-    if(!routeValid()){showToast('Otimize a rota antes de começar.');return;}
-    started=true;activeArrivalId=null;save();drawAll();showToast('Rota iniciada. Boa entrega!');
-  });
+  function startRoute(){if(!planValid()){toast('Primeiro clique em Otimizar rota.');return;}started=true;save();render();openView('mapa');toast('Rota iniciada!');}
+  ui.start.addEventListener('click',startRoute);
 
-  // ---- Delivery list and progress ----
-  function el(tag, className, text) { const node=document.createElement(tag);if(className)node.className=className;if(text!==undefined)node.textContent=text;return node; }
-  function buildButton(label, action, className='', title='') {
-    const b=el('button',className,label);b.type='button';if(title)b.title=title;b.addEventListener('click',action);return b;
-  }
-  function renderStops() {
-    ui.list.replaceChildren();
-    if(!stops.length)ui.list.append(el('div','empty','Nenhuma entrega cadastrada. Digite uma rua acima para começar.'));
-    const next=started?stops.find(p=>!p.concluida):null;
-    const overlapIds=coincidentStopIds();
-    stops.forEach((stop,index)=>{
-      const card=el('article',`stop${stop.concluida?' completed':''}${next?.id===stop.id?' primary':''}`);
-      const num=el('span','stop-index',String(index+1));
-      const info=el('div','stop-info');
-      info.append(el('strong',stop.concluida?'done':'',stop.endereco));
-      info.append(el('small','',`${stop.concluida?'Concluída':'Pendente'} · ${stop.precision==='exata'?'Número identificado no mapa':stop.precision==='estimada'?'Número estimado entre endereços mapeados':'Localização aproximada da rua'}`));
-      if(overlapIds.has(stop.id)) info.append(el('small','location-warning','⚠ Número não mapeado: outras entregas usam este mesmo ponto aproximado. Use Navegar para pesquisar o número completo.'));
-      const actions=el('div','stop-actions');
-      const link=el('a','', '↗ Navegar');link.href=locationURL(stop);link.target='_blank';link.rel='noopener noreferrer';
-      const mark=buildButton(stop.concluida?'↶ Desfazer':'✓ Entregue',()=>toggleDone(stop.id),'done-btn');
-      const edit=buildButton('✎ Editar',()=>editStop(stop.id));
-      const mapJump=buildButton('⌖ Mapa',()=>{
-        focusedStopId=stop.id;
-        openTab('mapa');
-        // O cartão aparece mesmo antes de o mapa terminar de carregar.
-        requestAnimationFrame(()=>openMapCard(stop.id,{fly:true}));
-      },'map-jump');
-      const remove=buildButton('✕',()=>{
-        if(!confirm(`Remover a entrega: ${stop.endereco}?`))return;
-        stops=stops.filter(x=>x.id!==stop.id);if(editingId===stop.id)editingId=null;
-        invalidate();save();drawAll();
-      },'remove','Excluir entrega');
-      actions.append(mapJump,link,mark,edit,remove);
-      card.append(num,info,actions);ui.list.appendChild(card);
+  function emptyFC(){return {type:'FeatureCollection',features:[]};}
+  function pointFeature(id,lng,lat,props){return {type:'Feature',id,properties:props,geometry:{type:'Point',coordinates:[lng,lat]}};}
+  function makePointData(){
+    const groups=new Map();
+    const originKey='origin';
+    const features=[pointFeature(originKey,origin.lon,origin.lat,{ids:'',label:'S',status:'origin',selected:0,origin:1})];
+    stops.forEach((p,index)=>{
+      const key=`${p.lon.toFixed(6)}:${p.lat.toFixed(6)}`;
+      const group=groups.get(key)||[];group.push({stop:p,index});groups.set(key,group);
     });
-  }
-  function renderMapRouteInfo() {
-    const pendingStops = stops.filter(s => !s.concluida);
-    const doneCount = stops.length - pendingStops.length;
-    const ready = Boolean(routeValid());
-    const current = started ? pendingStops[0] : null;
-    ui.mapRoutePending.textContent = String(pendingStops.length);
-    ui.mapRouteKm.textContent = ready ? `${planned.km.toFixed(1).replace('.', ',')} km` : '—';
-    ui.mapRouteTime.textContent = ready ? `${planned.mins} min` : '—';
-    ui.mapRoutePhase.textContent = current ? `Em rota · entrega ${stops.indexOf(current) + 1}` :
-      started && !current ? 'Todas as entregas concluídas' : ready ? 'Rota otimizada' :
-      stops.length ? 'Preparando sua rota' : 'Nenhuma entrega cadastrada';
-    ui.mapRouteNote.textContent = current ? `Destino atual: ${current.endereco}` :
-      ready ? `Sequência pronta · ${doneCount} de ${stops.length} concluídas` :
-      stops.length ? 'Toque em Otimizar rota na aba Entregas quando terminar de cadastrar.' :
-      'Adicione endereços na aba Entregas para ver o percurso aqui.';
-    ui.mapSequence.replaceChildren();
-    ui.mapSequenceStatus.textContent = ready ? `${pendingStops.length} pendentes` : 'Antes de otimizar';
-    ui.mapSequenceHint.textContent = ready
-      ? 'Toque em uma parada para localizar no mapa e consultar o endereço.'
-      : 'Ordem de cadastro: a sequência definitiva será calculada ao otimizar.';
-    if (!stops.length) {
-      const item = document.createElement('li'); item.className = 'sequence-empty';
-      item.textContent = 'Nenhum destino cadastrado ainda.';
-      ui.mapSequence.appendChild(item);
-      return;
-    }
-    stops.forEach((stop, index) => {
-      const li = document.createElement('li');
-      const btn = document.createElement('button');
-      btn.type = 'button';
-      btn.className = `sequence-stop${stop.concluida?' done':''}${current?.id===stop.id?' current':''}`;
-      const number = document.createElement('span'); number.className = 'sequence-number'; number.textContent = String(index + 1);
-      const text = document.createElement('span'); text.className = 'sequence-address';
-      const address = document.createElement('strong'); address.textContent = stop.endereco;
-      const label = document.createElement('small');
-      label.textContent = stop.concluida ? '✓ Concluída' : current?.id === stop.id ? '● Entrega atual' :
-        ready ? 'Próxima da sequência' : 'Aguardando otimização';
-      text.append(address, label);
-      btn.append(number, text);
-      btn.setAttribute('aria-label', `Ver parada ${index + 1}: ${stop.endereco}`);
-      btn.addEventListener('click', () => {
-        focusedStopId = stop.id;
-        openTab('mapa');
-        requestAnimationFrame(() => openMapCard(stop.id, {fly:true}));
-      });
-      li.appendChild(btn);
-      ui.mapSequence.appendChild(li);
+    groups.forEach((group,key)=>{
+      const first=group[0].stop;
+      const current=started&&group.some(x=>x.stop.id===nextStop()?.id);
+      const status=group.every(x=>x.stop.concluida)?'done':current?'next':group.some(x=>x.stop.precision!=='exata')?'approx':'pending';
+      features.push(pointFeature(key,first.lon,first.lat,{ids:JSON.stringify(group.map(x=>x.stop.id)),label:group.length>1?String(group.length):String(group[0].index+1),status,selected:group.some(x=>x.stop.id===focusedStopId)?1:0,origin:0}));
     });
+    mapPointFeatures=features;
+    return {type:'FeatureCollection',features};
   }
-
-  function drawStats() {
-    const total=stops.length, done=stops.filter(p=>p.concluida).length,pending=total-done;
-    ui.heroCount.textContent=String(pending);
-    ui.navCount.textContent=String(total);
-    ui.topbarProgress.textContent=total ? `${done} de ${total} entregas concluídas` : 'Seu planejamento começa aqui';
-    ui.heroKm.textContent=routeValid()?`${planned.km.toFixed(1).replace('.',',')} km`:'—';
-    ui.heroMin.textContent=routeValid()?`${planned.mins} min`:'—';
-    const overlapCount=duplicateLocations().flat().length;
-    ui.heroNotice.textContent=overlapCount ? `${overlapCount} entregas compartilham localização aproximada: atenção aos números antes de sair.` :
-      routeValid()?(planned.approximate?'Rota pronta · alguns pontos são estimados.':'Rota pronta para iniciar.') :total?'Você adicionou endereços. Clique em Otimizar rota quando terminar.':'Adicione suas entregas para começar.';
-    ui.optimize.disabled=optimizing||!pending;
-    ui.start.disabled=optimizing||!routeValid();
-    ui.count.textContent=`${total} ${total===1?'parada':'paradas'}`;
-    ui.subtitle.textContent=`${pending} ${pending===1?'pendente':'pendentes'} · ${done} ${done===1?'concluída':'concluídas'}`;
-    ui.total.textContent=String(total);ui.pending.textContent=String(pending);ui.done.textContent=String(done);
-    const percent=total?Math.round(done/total*100):0;
-    ui.percent.textContent=`${percent}%`;ui.progressBar.style.width=`${percent}%`;
-    ui.mapBadge.textContent=routeValid()?(started?'Rota em andamento':'Rota otimizada'):'Em preparação';
-    ui.mapStatus.textContent=routeValid()?(planned.roadLine?'Percurso traçado pelas ruas.':'Percurso aproximado.'): 'Os pontos aparecem enquanto você cadastra. A linha aparece após otimizar.';
-    const target=started?stops.find(p=>!p.concluida):null;
-    ui.next.classList.toggle('hidden',!target);
-    if(target){ui.nextNumber.textContent=String(stops.indexOf(target)+1);ui.nextAddress.textContent=target.endereco;
-      ui.nextNavigate.href=locationURL(target);ui.nextProgress.textContent=`${done} de ${total} concluídas`;
-      ui.nextDone.onclick=()=>{ if(!target.concluida) toggleDone(target.id); };
-    }else ui.arrived.classList.add('hidden');
+  function routeData(){
+    if(!planValid() || !Array.isArray(plan.geometry) || plan.geometry.length<2)return emptyFC();
+    return {type:'FeatureCollection',features:[{type:'Feature',properties:{type:'route'},geometry:{type:'LineString',coordinates:plan.geometry}}]};
   }
-  function updateJourneyUI() {
-    const ready = Boolean(routeValid());
-    const pending = stops.filter(s => !s.concluida);
-    const current = pending[0] || null;
-    ui.routeMap.classList.toggle('hidden', !ready);
-    ui.dock.classList.toggle('hidden', !ready || activeTab === 'mapa');
-    ui.mapRunner.classList.toggle('hidden', !ready || !ui.mapFloat.classList.contains('hidden'));
-    ui.mapQuickInfo.textContent = ready
-      ? `${pending.length} pendentes  ·  ${planned.km.toFixed(1).replace('.',',')} km`
-      : `${stops.length} endereços  ·  ${stops.length ? 'otimize para traçar' : 'adicione suas entregas'}`;
-    if (!ready) return;
-    if (started && current) {
-      const n=stops.indexOf(current)+1;
-      ui.dockKicker.textContent = `ENTREGA ${n} DE ${stops.length}`;
-      ui.dockTitle.textContent = current.endereco;
-      ui.dockAction.textContent = '✓ Entregue';
-      ui.mapRunnerKicker.textContent = `DESTINO ATUAL · ${n} DE ${stops.length}`;
-      ui.mapRunnerAddress.textContent = current.endereco;
-      ui.mapRunnerDetail.textContent = current.precision === 'exata' ? 'Número identificado' : 'Localização aproximada: confira o número';
-      ui.mapRunnerMain.textContent = '✓ Entregue';
-      ui.mapRunnerMain.disabled = false;
-      ui.mapRunnerNavigate.href = locationURL(current);
-      ui.mapRunnerNavigate.classList.remove('hidden');
-    } else if (started && !current) {
-      ui.dockKicker.textContent = 'ROTA CONCLUÍDA';
-      ui.dockTitle.textContent = 'Todas as entregas finalizadas';
-      ui.dockAction.textContent = '✓ Feito';
-      ui.mapRunnerKicker.textContent = 'PARABÉNS!';
-      ui.mapRunnerAddress.textContent = 'Todas as entregas concluídas';
-      ui.mapRunnerDetail.textContent = 'Você concluiu sua rota.';
-      ui.mapRunnerMain.textContent = '✓ Concluído';
-      ui.mapRunnerMain.disabled = true;
-      ui.mapRunnerNavigate.classList.add('hidden');
-    } else {
-      ui.dockKicker.textContent = 'ROTA OTIMIZADA';
-      ui.dockTitle.textContent = `${pending.length} entregas · ${planned.km.toFixed(1).replace('.',',')} km`;
-      ui.dockAction.textContent = '▶ Começar';
-      ui.mapRunnerKicker.textContent = 'ROTA PRONTA';
-      ui.mapRunnerAddress.textContent = `${pending.length} paradas na melhor sequência estimada`;
-      ui.mapRunnerDetail.textContent = 'Confira os destinos e inicie sua rota';
-      ui.mapRunnerMain.textContent = '▶ Começar rota';
-      ui.mapRunnerMain.disabled = false;
-      ui.mapRunnerNavigate.classList.add('hidden');
+  function gpsData(){return gpsFix && isPoint(gpsFix)?{type:'FeatureCollection',features:[pointFeature('gps',gpsFix.lon,gpsFix.lat,{id:'gps'})]}:emptyFC();}
+  function updateMapSources(){
+    if(!mapReady||!map)return;
+    const points=map.getSource('rf-points'),line=map.getSource('rf-route'),gps=map.getSource('rf-gps');
+    if(points)points.setData(makePointData());
+    if(line)line.setData(routeData());
+    if(gps)gps.setData(gpsData());
+  }
+  function addMapLayers(){
+    if(!map || map.getSource('rf-points'))return;
+    map.addSource('rf-route',{type:'geojson',data:emptyFC()});
+    map.addLayer({id:'rf-route-line',type:'line',source:'rf-route',layout:{'line-cap':'round','line-join':'round'},paint:{'line-color':'#13a278','line-width':5,'line-opacity':0.92}});
+    map.addSource('rf-points',{type:'geojson',data:emptyFC()});
+    map.addLayer({id:'rf-point-halo',type:'circle',source:'rf-points',paint:{
+      'circle-radius':['case',['==',['get','selected'],1],23,0],
+      'circle-color':'#d5f779','circle-opacity':0.65,'circle-blur':0.35}});
+    map.addLayer({id:'rf-point-circles',type:'circle',source:'rf-points',paint:{
+      'circle-radius':['case',['==',['get','status'],'origin'],16,['==',['get','status'],'next'],17,15],
+      'circle-color':['match',['get','status'],'origin','#2466a7','next','#e05e4d','done','#94a69c','approx','#b28346','#14866c'],
+      'circle-stroke-width':3,'circle-stroke-color':'#ffffff','circle-opacity':1}});
+    map.addLayer({id:'rf-point-labels',type:'symbol',source:'rf-points',layout:{'text-field':['get','label'],'text-size':12,'text-font':['Open Sans Bold','Arial Unicode MS Bold'],'text-allow-overlap':true,'text-ignore-placement':true},paint:{'text-color':'#fff','text-halo-width':0}});
+    map.addSource('rf-gps',{type:'geojson',data:emptyFC()});
+    map.addLayer({id:'rf-gps-halo',type:'circle',source:'rf-gps',paint:{'circle-radius':17,'circle-color':'#2679e7','circle-opacity':0.18,'circle-blur':0.3}});
+    map.addLayer({id:'rf-gps-dot',type:'circle',source:'rf-gps',paint:{'circle-radius':8,'circle-color':'#2b80ec','circle-stroke-width':3,'circle-stroke-color':'#fff'}});
+    const openPoint=e=>{const f=e.features?.[0];if(f)showFeatureCard(f);};
+    for(const layer of ['rf-point-circles','rf-point-labels']){
+      map.on('click',layer,openPoint);
+      map.on('mouseenter',layer,()=>{map.getCanvas().style.cursor='pointer';});
+      map.on('mouseleave',layer,()=>{map.getCanvas().style.cursor='';});
     }
+    updateMapSources();
   }
-  const startOrComplete = () => {
-    if (!routeValid()) return;
-    if (!started) { ui.start.click(); return; }
-    const current = stops.find(s => !s.concluida);
-    if (current) toggleDone(current.id);
-  };
-  ui.routeMap.addEventListener('click', () => openTab('mapa'));
-  ui.dockMap.addEventListener('click', () => openTab('mapa'));
-  ui.dockAction.addEventListener('click', startOrComplete);
-  ui.mapRunnerMain.addEventListener('click', startOrComplete);
-  function drawAll(){renderStops();drawStats();renderMapRouteInfo();drawMap();updateJourneyUI();}
-  ui.clean.addEventListener('click',()=>{
-    const count=stops.filter(p=>p.concluida).length;
-    if(!count){showToast('Nenhuma entrega concluída para remover.');return;}
-    stops=stops.filter(p=>!p.concluida);invalidate();save();drawAll();
+  function ensureMap(){
+    if(mapRequested)return;
+    mapRequested=true;
+    if(typeof window.maplibregl==='undefined'){
+      ui.mapError.classList.remove('hidden');ui.mapStatus.textContent='Biblioteca de mapa indisponível.';return;
+    }
+    try {
+      map=new maplibregl.Map({container:'map',style:CFG.mapStyle,center:[origin.lon,origin.lat],zoom:12.4,attributionControl:true});
+      map.addControl(new maplibregl.NavigationControl({showCompass:false}),'bottom-right');
+      map.on('load',()=>{mapReady=true;addMapLayers();map.resize();fitMap();});
+      map.on('error',e=>{console.warn('Aviso do provedor de mapa:',e.error||e);});
+      // Context restores/redraws are handled by MapLibre. On a new style, sources must be recreated.
+      map.on('style.load',()=>{if(mapReady&&!map.getSource('rf-points'))addMapLayers();});
+    } catch(e) {console.error('Falha ao iniciar mapa:',e);ui.mapError.classList.remove('hidden');ui.mapStatus.textContent='Mapa indisponível.';}
+  }
+  function fitMap(){
+    if(!mapReady||!map)return;
+    const points=[origin,...stops];
+    if(points.length===1)map.easeTo({center:[origin.lon,origin.lat],zoom:13});
+    else {const b=new maplibregl.LngLatBounds([points[0].lon,points[0].lat],[points[0].lon,points[0].lat]);
+      points.slice(1).forEach(p=>b.extend([p.lon,p.lat]));
+      map.fitBounds(b,{padding:{top:65,right:60,bottom:130,left:60},maxZoom:16.5,duration:500});}
+  }
+  ui.fit.addEventListener('click',fitMap);
+  function focusStop(id){
+    const p=stops.find(s=>s.id===id);if(!p)return;
+    focusedStopId=id;showStopCard(p);
+    updateMapSources();
+    if(mapReady)map.easeTo({center:[p.lon,p.lat],zoom:Math.max(map.getZoom(),15),duration:350});
+  }
+  function showFeatureCard(feature){
+    if(feature.properties?.origin===1){focusedStopId=null;closeCard();toast('Este é o seu ponto de partida.');return;}
+    let ids=[];try{ids=JSON.parse(feature.properties?.ids||'[]');}catch{}
+    const group=ids.map(id=>stops.find(s=>s.id===id)).filter(Boolean);
+    if(!group.length)return;
+    cardGroup=group;
+    showStopCard(group[0]);
+  }
+  function showStopCard(p){
+    if(!p)return;
+    focusedStopId=p.id;
+    ui.card.classList.remove('hidden');ui.dock.classList.add('hidden');
+    ui.cardLabel.textContent=`PARADA ${stops.findIndex(s=>s.id===p.id)+1}`;
+    ui.cardAddress.textContent=p.endereco;
+    ui.cardDetail.textContent=p.concluida?'Entrega concluída':p.precision==='exata'?'Número identificado no mapa':'Localização aproximada: confira o número ao navegar';
+    ui.cardNav.href=navLink(p);
+    ui.cardDone.textContent=p.concluida?'↶ Desfazer':'✓ Entregue';
+    ui.cardDone.onclick=()=>{toggleDone(p.id);const refreshed=stops.find(s=>s.id===p.id);if(refreshed)showStopCard(refreshed);};
+    ui.cardChoices.replaceChildren();
+    const group=stops.filter(s=>Math.abs(s.lat-p.lat)<1e-6&&Math.abs(s.lon-p.lon)<1e-6);
+    if(group.length>1){group.forEach(s=>ui.cardChoices.append(listButton(s.endereco,()=>showStopCard(s))));ui.cardChoices.classList.remove('hidden');}
+    else ui.cardChoices.classList.add('hidden');
+    updateMapSources();
+  }
+  function closeCard(){focusedStopId=null;cardGroup=[];ui.card.classList.add('hidden');updateMapSources();updateDock();}
+  ui.cardClose.addEventListener('click',closeCard);
+
+  function updateDock(){
+    if(focusedStopId){ui.dock.classList.add('hidden');return;}
+    const next=nextStop();
+    if(!planValid()||!next){ui.dock.classList.add('hidden');return;}
+    ui.dock.classList.remove('hidden');
+    ui.dockKicker.textContent=started?'PRÓXIMA ENTREGA':'ROTA OTIMIZADA';
+    ui.dockAddress.textContent=started?next.endereco:'Sua sequência está pronta';
+    ui.dockDetail.textContent=started?`${stops.filter(s=>s.concluida).length} de ${stops.length} concluídas`:`${fmtNumber(plan.km)} km · ${Math.ceil(plan.mins)} min (estimativa)`;
+    ui.dockNav.classList.toggle('hidden',!started);ui.dockNav.href=navLink(next);
+    ui.dockAction.textContent=started?'✓ Entregue':'▶ Começar rota';
+    ui.dockAction.onclick=started?()=>toggleDone(next.id):startRoute;
+  }
+  function renderMapInfo(){
+    const pending=stops.filter(s=>!s.concluida).length;
+    ui.mapPending.textContent=String(pending);
+    ui.mapKm.textContent=planValid()?`${fmtNumber(plan.km)} km`:'—';
+    ui.mapTime.textContent=planValid()?`${Math.ceil(plan.mins)} min`:'—';
+    ui.mapRouteLabel.textContent=!planValid()?'Rota ainda não otimizada':started?'Rota em andamento':plan.roadLine?'Trajeto pelas ruas':'Trajeto estimado';
+    ui.mapStatus.textContent=planValid()?`${stops.length} paradas · ${fmtNumber(plan.km)} km`:`${stops.length} destinos no mapa`;
+    ui.sequence.replaceChildren();
+    if(!stops.length)ui.sequence.append(html('div','feedback','Nenhuma entrega na sequência.'));
+    stops.forEach((s,i)=>{const b=html('button','');b.type='button';b.append(html('span','',String(i+1)),html('div','',s.endereco));b.addEventListener('click',()=>focusStop(s.id));ui.sequence.append(b);});
+    ui.originDescription.textContent=`Origem: ${origin.endereco || 'São José dos Campos'}`;
+    ui.originInput.value=origin.personalizado?origin.endereco:'';
+    updateDock();
+  }
+  ui.originSet.addEventListener('click',async()=>{
+    const text=ui.originInput.value.trim();if(!text){toast('Digite um endereço de origem.');return;}
+    ui.originSet.disabled=true;
+    try{const data=await photon(photonURL(`${text}, ${ui.city.value}, ${ui.uf.value}`));
+      const feature=(data.features||[]).find(f=>isPoint({lat:f.geometry?.coordinates?.[1],lon:f.geometry?.coordinates?.[0]}));
+      if(!feature)throw new Error('Ponto de partida não localizado.');
+      origin={endereco:text,lat:Number(feature.geometry.coordinates[1]),lon:Number(feature.geometry.coordinates[0]),personalizado:true};
+      invalidate();save();render();fitMap();toast('Origem definida.');
+    }catch(e){toast(e.message||'Não foi possível definir a origem.');}finally{ui.originSet.disabled=false;}
   });
-  ui.reset.addEventListener('click',()=>{
-    if(!stops.length)return;
-    if(!confirm('Apagar todas as entregas e iniciar uma rota nova?'))return;
-    stops=[];editingId=null;selected=null;ui.input.value='';closeMapCard();invalidate();save();drawAll();showToast('Lista apagada.');
+  ui.originGps.addEventListener('click',()=>{
+    if(!navigator.geolocation){toast('GPS indisponível.');return;}
+    navigator.geolocation.getCurrentPosition(pos=>{origin={endereco:'Minha localização GPS',lat:pos.coords.latitude,lon:pos.coords.longitude,personalizado:true};invalidate();save();render();fitMap();toast('Origem atualizada pelo GPS.');},()=>toast('Permita o GPS nas configurações do navegador.'),{enableHighAccuracy:true,timeout:15000});
   });
 
-  // ---- Initialize ----
-  drawAll(); // A aba inicial é Entregas; o mapa será carregado ao acessar sua aba.
+  function updateGPS(){
+    if(!mapReady)return;
+    map.getSource('rf-gps')?.setData(gpsData());
+    if(gpsFix&&map.getLayer('rf-gps-halo'))map.setPaintProperty('rf-gps-halo','circle-radius',13+(Math.round(Date.now()/1500)%2)*7);
+  }
+  function checkArrival(){
+    if(!started||!gpsFix||gpsFix.accuracy>10)return;
+    const next=nextStop();if(!next||next.id===arrivalNotified)return;
+    // Não declarar chegada exata quando o número é apenas um ponto aproximado da rua.
+    if(next.precision==='exata'&&next.accessConfirmed&&meters(gpsFix,{lat:next.navLat,lon:next.navLon})<=10){arrivalNotified=next.id;toast('Você chegou ao destino. Confirme a entrega.');}
+  }
+  function beginGPS(){
+    if(!navigator.geolocation){toast('GPS não suportado pelo navegador.');return;}
+    if(gpsId!==null)return;
+    try{gpsId=navigator.geolocation.watchPosition(pos=>{
+      gpsFix={lat:pos.coords.latitude,lon:pos.coords.longitude,accuracy:pos.coords.accuracy,stamp:Date.now()};
+      updateGPS();checkArrival();
+    },err=>{
+      toast(err.code===1?'Permita o acesso à localização do dispositivo.':'GPS temporariamente indisponível.');stopGPS();
+    },{enableHighAccuracy:true,maximumAge:2000,timeout:15000});
+    }catch(e){toast('GPS não pôde ser ativado.');return;}
+    ui.gps.setAttribute('aria-pressed','true');ui.gps.textContent='◎ GPS ativo';
+    gpsPulseTimer=setInterval(updateGPS,3000);
+  }
+  function stopGPS(){if(gpsId!==null){navigator.geolocation.clearWatch(gpsId);gpsId=null;}clearInterval(gpsPulseTimer);gpsPulseTimer=null;ui.gps.setAttribute('aria-pressed','false');ui.gps.textContent='◎ GPS';gpsFix=null;updateGPS();}
+  ui.gps.addEventListener('click',()=>gpsId===null?beginGPS():stopGPS());
+  window.addEventListener('pagehide',stopGPS);
+
+  function renderActions(){
+    const valid=planValid(), pending=stops.filter(s=>!s.concluida).length;
+    ui.start.disabled=!valid||started||working||pending===0;
+    ui.optimize.disabled=working||pending===0;
+    ui.toMap.classList.toggle('hidden',!valid);
+    ui.actionHint.textContent=working?'Calculando a melhor sequência disponível...':!stops.length?'Adicione endereços para preparar sua rota.':!valid?'Endereços cadastrados. Clique em Otimizar rota.':started?'Rota iniciada. Acompanhe o mapa e marque cada entrega.':`Rota pronta: ${fmtNumber(plan.km)} km · ${Math.ceil(plan.mins)} min`;
+  }
+  function render(){
+    const total=stops.length,done=stops.filter(p=>p.concluida).length,pending=total-done;
+    ui.navCount.textContent=String(total);ui.count.textContent=`${total} ${total===1?'parada':'paradas'}`;
+    ui.listDetail.textContent=`${pending} pendente(s) · ${done} concluída(s)`;
+    ui.topProgress.textContent=started?`${done} de ${total} entregues`:planValid()?'Rota pronta para iniciar':`${total} endereços cadastrados`;
+    ui.statTotal.textContent=String(total);ui.statPending.textContent=String(pending);ui.statDone.textContent=String(done);
+    const percent=total?Math.round(done/total*100):0;ui.statPercent.textContent=`${percent}%`;ui.progressBar.style.width=`${percent}%`;
+    ui.summaryRouteTitle.textContent=planValid()?(started?'Rota em andamento':'Rota pronta'):'Rota não otimizada';
+    ui.summaryRouteDescription.textContent=planValid()?`${fmtNumber(plan.km)} km · ${Math.ceil(plan.mins)} min (estimativa)`:'Adicione endereços e clique em Otimizar rota.';
+    renderActions();renderList();renderMapInfo();updateMapSources();
+    if (focusedStopId&&!stops.some(p=>p.id===focusedStopId))closeCard();
+  }
+  // Test hooks for local automated verification of geometry, legacy migration, and scheduling.
+  Object.defineProperty(window,'__rfDiagnostics',{value:Object.freeze({parsed,meters,makePointData,routeData,fingerprint,stops:()=>stops,planValid})});
+  save();render();
 })();
