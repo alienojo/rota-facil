@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  // RotaFácil V13 — navegação por abas e cartões flutuantes sobre o mapa.
+  // RotaFácil V15 — mapa com sequência, rota contínua e cadastro responsivo e cartões flutuantes sobre o mapa.
   // Photon oferece busca conforme digita; ViaCEP complementa rua, bairro e CEP.
   // Para escala comercial, hospede um serviço de geocodificação com SLA/proxy próprio.
   const CFG = Object.freeze({
@@ -10,7 +10,7 @@
     overpass: 'https://overpass-api.de/api/interpreter',
     addressLookupRadius: 2500, addressLookupTimeout: 7500,
     mapStyle: 'https://tiles.openfreemap.org/styles/positron',
-    debounceMs: 480, timeoutMs: 9000, maxStopsForRoadMatrix: 23, maxAddressChecks: 6,
+    debounceMs: 380, timeoutMs: 8000, maxStopsForRoadMatrix: 23, maxAddressChecks: 4,
     defaultOrigin: { endereco: 'Centro de São José dos Campos, SP', lat: -23.1794, lon: -45.8869, personalizado: false }
   });
   const ID = id => document.getElementById(id);
@@ -41,7 +41,10 @@
     mapFloatAddress: ID('map-float-address'), mapFloatDetail: ID('map-float-detail'),
     mapFloatNavigate: ID('map-float-navigate'), mapFloatDone: ID('map-float-done'),
     mapFloatEdit: ID('map-float-edit'), mapFloatChoices: ID('map-float-choices'),
-    mapFloatActions: ID('map-float-actions'), mapHint: ID('map-hint')
+    mapFloatActions: ID('map-float-actions'), mapHint: ID('map-hint'),
+    mapRoutePhase: ID('map-route-phase'), mapRouteNote: ID('map-route-note'),
+    mapRoutePending: ID('map-route-pending'), mapRouteKm: ID('map-route-km'), mapRouteTime: ID('map-route-time'),
+    mapSequence: ID('map-sequence-list'), mapSequenceStatus: ID('map-sequence-status'), mapSequenceHint: ID('map-sequence-hint')
   };
   const missing = Object.entries(ui).flatMap(([key, element]) =>
     Array.isArray(element) ? element.some(item => !item) ? [key] : [] : !element ? [key] : []);
@@ -98,6 +101,8 @@
   let map = null, mapReady = false, gpsMarker = null, gpsAccuracyMarker = null, markers = [];
   let gpsWatchId = null, gpsVisualTimer = null, gpsFix = null, activeArrivalId = null;
   let activeTab = 'entregas', mapInitialized = false, focusedStopId = null, focusedGroupKey = null;
+  const roadSnapCache = new Map();
+  const refineInProgress = new Set();
 
   function signature() { return JSON.stringify({ origin: [origin.lat, origin.lon], stops: stops.map(p => [p.id, p.lat, p.lon, p.navLat, p.navLon, p.concluida]) }); }
   function routeValid() { return planned && planned.signature === signature() && Array.isArray(planned.order) && planned.order.length > 0; }
@@ -317,31 +322,21 @@
     ui.add.focus();
   }
   async function getPhotonCandidates(query, userArea, signal) {
-    // Pesquise primeiro o endereço completo, INCLUINDO o número da residência.
-    // A busca de rua é apenas o plano B: ela nunca será rotulada como número exato.
-    const fetchByText = async (text) => {
-      const params = new URLSearchParams({ q: text, limit: '12', countrycode: 'BR',
-        lat: String(origin.lat), lon: String(origin.lon) });
-      const json = await photonJSON(`${CFG.photon}/api?${params.toString()}`, signal);
-      return (Array.isArray(json.features) ? json.features : []).map(featureToCandidate).filter(Boolean);
-    };
-    const full = query.number ? `${query.road} ${query.number}, ${userArea.city}` : `${query.road}, ${userArea.city}`;
-    let result = [];
-    try { result = await fetchByText(full); }
-    catch (error) { if (signal?.aborted) throw error; console.warn('Pesquisa completa:', error); }
-    if (signal?.aborted) throw new DOMException('Cancelada', 'AbortError');
-    // Rua + número nem sempre está disponível no OpenStreetMap.
-    const hasMatchingStreet = result.some(c => normalizeRoad(c.road) === normalizeRoad(query.road));
-    const hasHouse = result.some(c => c.house && norm(c.house) === norm(query.number) &&
-      normalizeRoad(c.road) === normalizeRoad(query.road));
-    if (!hasMatchingStreet || (query.number && !hasHouse)) {
-      try {
-        const extra = await fetchByText(query.road);
-        result = mergeCandidates(result, extra);
-      } catch (error) { if (!result.length) throw error; if (signal?.aborted) throw error; }
-    }
-    // Não oferecer números de imóveis diferentes como se fossem o número digitado.
-    return result.filter(c => !query.number || !c.house || norm(c.house) === norm(query.number));
+    // Um pedido Photon por alteração de rua, sem duas buscas sequenciais que travavam
+    // o campo por segundos. O número permanece na sugestão; busca exata ocorre depois.
+    const params = new URLSearchParams({
+      q: query.road,
+      limit: '12', countrycode: 'BR',
+      lat: String(origin.lat), lon: String(origin.lon)
+    });
+    const json = await photonJSON(`${CFG.photon}/api?${params.toString()}`, signal);
+    const found = (Array.isArray(json.features) ? json.features : [])
+      .map(featureToCandidate).filter(Boolean);
+    // As sugestões precisam corresponder ao nome da rua, não um local de nome parecido.
+    return found.filter(c => {
+      const street = normalizeRoad(c.road), typed = normalizeRoad(query.road);
+      return street === typed || street.startsWith(typed) || typed.startsWith(street);
+    });
   }
   async function getViaCepCandidates(query, userArea, signal) {
     const road = query.road.replace(/^(rua|avenida|av\.?|travessa|alameda|praca|praça)\s+/i,'').trim();
@@ -647,7 +642,16 @@
     hideSuggestions();
     textStatus('Procurando o número da casa e a localização da rua...');
     try {
-      const coord = await resolveCoordinates(candidate, userArea, ctrl.signal);
+      // Sugestão com coordenadas: cadastro imediato, sem aguardar outra API.
+      // O número será verificado em segundo plano, sem prometer precisão fictícia.
+      const fastKnown = addressChosen && validPoint(candidate);
+      const alreadyExact = fastKnown && candidate.house && candidate.typedNumber &&
+        norm(candidate.house) === norm(candidate.typedNumber);
+      const coord = fastKnown
+        ? { lat: Number(candidate.lat), lon: Number(candidate.lon),
+            precision: alreadyExact ? 'exata' : 'aproximada',
+            source: alreadyExact ? 'photon-number' : 'street-reference' }
+        : await resolveCoordinates(candidate, userArea, ctrl.signal);
       if (ui.input.value.trim() !== typed) throw new Error('O endereço foi alterado. Confirme novamente antes de salvar.');
       if (token !== routeRevision) throw new Error('A rota mudou enquanto você adicionava o endereço. Tente novamente.');
       const data = stopFromCandidate(candidate, coord, typed);
@@ -658,6 +662,8 @@
       } else {
         stops.push({ id: `${Date.now()}-${Math.random().toString(36).slice(2,8)}`, ...data, concluida: false });
       }
+      const savedStopId = editingId || stops[stops.length - 1].id;
+      const shouldRefine = fastKnown && !alreadyExact && Boolean(data.number);
       const wasEditing = Boolean(editingId);
       editingId = null;
       ui.input.value = ''; selected = null;
@@ -667,6 +673,7 @@
       invalidate(); drawAll(); save();
       textStatus(wasEditing ? 'Endereço atualizado na lista.' : 'Entrega adicionada à lista.');
       if (coord.precision !== 'exata') showToast(coord.precision==='estimada'?'Entrega adicionada com posição estimada pelo número.':'Entrega adicionada com localização aproximada da rua.');
+      if (shouldRefine) refineNumberInBackground(savedStopId, candidate, userArea);
     } catch (error) {
       if (error.name === 'AbortError') textStatus('A busca foi interrompida. Tente novamente.', true);
       else if (error.status || error instanceof TypeError)
@@ -674,6 +681,32 @@
       else textStatus(error.message || 'Não conseguimos localizar este endereço. Tente outra sugestão.', true);
     } finally { setBusy(ui.add, false, ''); if (!editingId) ui.add.textContent = '＋ Adicionar entrega'; }
   });
+
+  async function refineNumberInBackground(id, candidate, userArea) {
+    if (refineInProgress.has(id)) return;
+    const current = stops.find(p => p.id === id);
+    if (!current || !current.number || current.precision === 'exata' || routeValid() || started) return;
+    refineInProgress.add(id);
+    const originalAddress = current.endereco;
+    const startingRevision = routeRevision;
+    const controller = new AbortController();
+    // Refinamento opcional: o motorista não fica esperando a localização detalhada.
+    try {
+      const coord = await resolveCoordinates(candidate, userArea, controller.signal);
+      const stop = stops.find(p => p.id === id);
+      if (!stop || stop.endereco !== originalAddress || startingRevision !== routeRevision || routeValid() || started) return;
+      if (coord.precision === 'exata' || coord.precision === 'estimada') {
+        stop.lat = coord.lat; stop.lon = coord.lon;
+        stop.propertyLat = coord.lat; stop.propertyLon = coord.lon;
+        stop.navLat = coord.lat; stop.navLon = coord.lon;
+        stop.precision = coord.precision; stop.locationSource = coord.source;
+        invalidate(); save(); drawAll();
+        if (activeTab === 'mapa') showToast('A localização de uma entrega foi refinada pelo número.');
+      }
+    } catch (error) {
+      console.info('Não foi possível refinar o número; mantendo referência da rua.', error);
+    } finally { refineInProgress.delete(id); }
+  }
 
   ui.cancelEdit.addEventListener('click', () => {
     editingId = null; selected = null; ui.input.value = '';
@@ -703,7 +736,10 @@
         if (!mapInitialized) initMap();
         else {
           map?.resize();
-          if (mapReady) { fitMap(); if (focusedStopId) openMapCard(focusedStopId); }
+          if (mapReady) {
+            if (!focusedStopId) fitMap();
+            else openMapCard(focusedStopId, {fly:true});
+          }
         }
       });
     }
@@ -828,7 +864,8 @@
         mapReady = true;
         map.resize();
         map.addSource('route-line', { type:'geojson', data:{ type:'FeatureCollection',features:[] } });
-        map.addLayer({id:'route-stroke',source:'route-line',type:'line',layout:{'line-cap':'round','line-join':'round'},paint:{'line-color':'#278e69','line-width':5,'line-opacity':.9}});
+        map.addLayer({id:'route-casing',source:'route-line',type:'line',layout:{'line-cap':'round','line-join':'round'},paint:{'line-color':'#ffffff','line-width':9,'line-opacity':.95}});
+        map.addLayer({id:'route-stroke',source:'route-line',type:'line',layout:{'line-cap':'round','line-join':'round'},paint:{'line-color':'#16866a','line-width':5.5,'line-opacity':1}});
         drawMap();
         fitMap();
       });
@@ -851,7 +888,7 @@
     const text = document.createElement('span'); text.className='pin-label';text.textContent=label;
     element.appendChild(text);
     element.addEventListener('click', event => { event.stopPropagation(); onClick(); });
-    const marker = new maplibregl.Marker({ element }).setLngLat([lng,lat]).addTo(map);
+    const marker = new maplibregl.Marker({ element, anchor: 'bottom' }).setLngLat([lng,lat]).addTo(map);
     markers.push({marker,element,stopId,key});
   }
   function fitMap() {
@@ -916,7 +953,8 @@
     const line = routeValid() ? planned.geometry : null;
     const feature = line && line.length > 1 ? {type:'Feature',properties:{},geometry:{type:'LineString',coordinates:line}} : null;
     map.getSource('route-line')?.setData({type:'FeatureCollection',features:feature?[feature]:[]});
-    map.setPaintProperty('route-stroke','line-dasharray',planned?.approximate?[1.4,1.4]:[1,0]);
+    // Linha sempre sólida, seguindo as ruas quando há geometria OSRM.
+    // Nunca adicionar line-dasharray (o tracejado anterior confundia usuários).
     if (focusedStopId) openMapCard(focusedStopId);
     else if (focusedGroupKey && groups.has(focusedGroupKey) && groups.get(focusedGroupKey).length>1)
       openMapGroup(groups.get(focusedGroupKey),focusedGroupKey);
@@ -998,6 +1036,8 @@
   // ---- Última milha: pino no imóvel; navegação na rua, se identificada. ----
   async function snapToNamedRoad(point,street) {
     if(!validPoint(point)||!street)return null;
+    const cacheKey=`${normalizeRoad(street)}:${point.lat.toFixed(4)}:${point.lon.toFixed(4)}`;
+    if(roadSnapCache.has(cacheKey))return roadSnapCache.get(cacheKey);
     try {
       const url=`${CFG.osrm}/nearest/v1/driving/${point.lon},${point.lat}?number=8`;
       const data=await getJSONRemote(url,{timeout:4200});
@@ -1006,11 +1046,14 @@
         normalizeRoad(w.name)===normalizeRoad(street)&&Number(w.distance)<=90)
         .sort((a,b)=>a.distance-b.distance);
       if(!valid.length)return null;
-      return {lat:valid[0].location[1],lon:valid[0].location[0]};
+      const road={lat:valid[0].location[1],lon:valid[0].location[0]};
+      roadSnapCache.set(cacheKey,road);
+      if(roadSnapCache.size>70)roadSnapCache.delete(roadSnapCache.keys().next().value);
+      return road;
     }catch(error){console.warn('Ponto viário indisponível:',error);return null;}
   }
   async function improvePendingLocations(list,snapshot) {
-    const eligible=list.filter(stop=>stop.road&&!stop.locationChecked&&stop.precision!=='aproximada').slice(0,CFG.maxAddressChecks);
+    const eligible=list.filter(stop=>stop.road&&!stop.locationChecked).slice(0,CFG.maxAddressChecks);
     // limitar solicitações ao serviço público de rotas e não sobrecarregá-lo
     for(const stop of eligible){
       if(routeRevision!==snapshot)return;
@@ -1021,6 +1064,11 @@
       if(!current)continue;
       current.navLat=road?road.lat:place.lat;
       current.navLon=road?road.lon:place.lon;
+      // Para referência genérica de rua, alinhar o pino ao trecho com nome confirmado.
+      // Para imóvel numerado, preservar o pino no próprio imóvel.
+      if (road && current.precision === 'aproximada') {
+        current.lat=road.lat; current.lon=road.lon;
+      }
       current.locationChecked=true;
       current.accessConfirmed=Boolean(road&&stop.precision==='exata');
       // Nunca mover a posição lat/lon do pino do imóvel para a rua.
@@ -1070,7 +1118,7 @@
     const url=`${CFG.osrm}/route/v1/driving/${coords}?overview=full&geometries=geojson&steps=false`;
     const data=await getJSONRemote(url,{timeout:18000});
     if(data.code!=='Ok'||!data.routes?.[0]?.geometry?.coordinates)throw new Error('Percurso indisponível');
-    return data.routes[0];
+    return { ...data.routes[0], waypoints: Array.isArray(data.waypoints) ? data.waypoints : [] };
   }
   function orderPending(ids) {
     const order=new Map(ids.map((p,i)=>[p.id,i]));
@@ -1100,6 +1148,21 @@
         try{route=await getRoadPolyline([origin,...ordered.map(navigationPoint)]);}catch(error){console.warn('Traçado por ruas indisponível:',error);}
       }
       if(snapshot!==routeRevision) return;
+      // OSRM pode devolver a posição real usada na malha viária para cada destino.
+      // Só alinhar pinos aproximados quando a rua retornada tem o mesmo nome e
+      // a posição está a até 80 m da referência anterior. Nunca fingir número exato.
+      if (Array.isArray(route?.waypoints) && route.waypoints.length === ordered.length + 1) {
+        ordered.forEach((stop,index) => {
+          const waypoint=route.waypoints[index+1];
+          if (stop.precision !== 'aproximada' || !stop.road || !Array.isArray(waypoint?.location)) return;
+          if (normalizeRoad(waypoint.name) !== normalizeRoad(stop.road)) return;
+          const aligned={lat:Number(waypoint.location[1]),lon:Number(waypoint.location[0])};
+          if (!validPoint(aligned) || meters(stop,aligned)>80) return;
+          stop.lat=aligned.lat;stop.lon=aligned.lon;
+          stop.navLat=aligned.lat;stop.navLon=aligned.lon;
+          stop.locationChecked=true;
+        });
+      }
       orderPending(ordered);
       const pointsOrdered=[origin,...ordered.map(navigationPoint)];
       const approxKm=pointsOrdered.slice(1).reduce((sum,p,i)=>sum+meters(pointsOrdered[i],p),0)*1.25/1000;
@@ -1154,6 +1217,56 @@
       card.append(num,info,actions);ui.list.appendChild(card);
     });
   }
+  function renderMapRouteInfo() {
+    const pendingStops = stops.filter(s => !s.concluida);
+    const doneCount = stops.length - pendingStops.length;
+    const ready = Boolean(routeValid());
+    const current = started ? pendingStops[0] : null;
+    ui.mapRoutePending.textContent = String(pendingStops.length);
+    ui.mapRouteKm.textContent = ready ? `${planned.km.toFixed(1).replace('.', ',')} km` : '—';
+    ui.mapRouteTime.textContent = ready ? `${planned.mins} min` : '—';
+    ui.mapRoutePhase.textContent = current ? `Em rota · entrega ${stops.indexOf(current) + 1}` :
+      started && !current ? 'Todas as entregas concluídas' : ready ? 'Rota otimizada' :
+      stops.length ? 'Preparando sua rota' : 'Nenhuma entrega cadastrada';
+    ui.mapRouteNote.textContent = current ? `Destino atual: ${current.endereco}` :
+      ready ? `Sequência pronta · ${doneCount} de ${stops.length} concluídas` :
+      stops.length ? 'Toque em Otimizar rota na aba Entregas quando terminar de cadastrar.' :
+      'Adicione endereços na aba Entregas para ver o percurso aqui.';
+    ui.mapSequence.replaceChildren();
+    ui.mapSequenceStatus.textContent = ready ? `${pendingStops.length} pendentes` : 'Antes de otimizar';
+    ui.mapSequenceHint.textContent = ready
+      ? 'Toque em uma parada para localizar no mapa e consultar o endereço.'
+      : 'Ordem de cadastro: a sequência definitiva será calculada ao otimizar.';
+    if (!stops.length) {
+      const item = document.createElement('li'); item.className = 'sequence-empty';
+      item.textContent = 'Nenhum destino cadastrado ainda.';
+      ui.mapSequence.appendChild(item);
+      return;
+    }
+    stops.forEach((stop, index) => {
+      const li = document.createElement('li');
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = `sequence-stop${stop.concluida?' done':''}${current?.id===stop.id?' current':''}`;
+      const number = document.createElement('span'); number.className = 'sequence-number'; number.textContent = String(index + 1);
+      const text = document.createElement('span'); text.className = 'sequence-address';
+      const address = document.createElement('strong'); address.textContent = stop.endereco;
+      const label = document.createElement('small');
+      label.textContent = stop.concluida ? '✓ Concluída' : current?.id === stop.id ? '● Entrega atual' :
+        ready ? 'Próxima da sequência' : 'Aguardando otimização';
+      text.append(address, label);
+      btn.append(number, text);
+      btn.setAttribute('aria-label', `Ver parada ${index + 1}: ${stop.endereco}`);
+      btn.addEventListener('click', () => {
+        focusedStopId = stop.id;
+        openTab('mapa');
+        requestAnimationFrame(() => openMapCard(stop.id, {fly:true}));
+      });
+      li.appendChild(btn);
+      ui.mapSequence.appendChild(li);
+    });
+  }
+
   function drawStats() {
     const total=stops.length, done=stops.filter(p=>p.concluida).length,pending=total-done;
     ui.heroCount.textContent=String(pending);
@@ -1180,7 +1293,7 @@
       ui.nextDone.onclick=()=>{ if(!target.concluida) toggleDone(target.id); };
     }else ui.arrived.classList.add('hidden');
   }
-  function drawAll(){renderStops();drawStats();drawMap();}
+  function drawAll(){renderStops();drawStats();renderMapRouteInfo();drawMap();}
   ui.clean.addEventListener('click',()=>{
     const count=stops.filter(p=>p.concluida).length;
     if(!count){showToast('Nenhuma entrega concluída para remover.');return;}

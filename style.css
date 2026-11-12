@@ -41,3 +41,46 @@ button,input{font:inherit}button{cursor:pointer}button:disabled{opacity:.4;curso
 .scan-button:disabled{opacity:.66}
 .address-wrap .spinner{right:113px;z-index:2;width:15px;height:15px}
 @media (max-width:360px){.scan-button{min-width:83px;font-size:10px;padding:0 5px}.scan-button svg{width:16px;height:16px}.address-wrap #address-input{padding-right:98px}.address-wrap .spinner{right:98px}}
+
+/* V15 · Mapa de execução: rota contínua, pinos ancorados e sequência clara. */
+.map-route-overview{display:flex;align-items:center;justify-content:space-between;gap:22px;background:#173e38;color:white;border-radius:18px;padding:19px 22px;margin-bottom:14px;box-shadow:0 12px 32px #15362d18}
+.map-route-overview .overline{color:#c1e69f}.map-route-overview-main{min-width:0;flex:1}
+.map-route-overview-main strong{display:block;font:800 18px/1.4 Manrope,sans-serif;margin:4px 0}
+.map-route-overview-main p{margin:5px 0 0;font-size:12px;color:#c0d9ce;line-height:1.5;overflow-wrap:anywhere}
+.map-route-overview-stats{display:flex;gap:18px;flex-wrap:wrap}
+.map-route-overview-stats>div{min-width:67px;display:flex;flex-direction:column;gap:6px}
+.map-route-overview-stats small{font-size:9px;font-weight:800;letter-spacing:1px;color:#a3c7b6}
+.map-route-overview-stats strong{font:800 19px Manrope,sans-serif;color:#e4ffb1}
+#panel-mapa>.next-stop{margin:14px 0 0;background:#174339}
+.map-route-sequence{padding:19px 20px;margin-top:15px}
+.map-sequence-top{display:flex;align-items:center;justify-content:space-between;gap:12px}
+.map-sequence-top h2{font:800 17px Manrope,sans-serif;margin:4px 0}
+.map-sequence-badge{background:#eff9e6;color:#416f4c;padding:7px 10px;border-radius:100px;font-size:11px;font-weight:800;white-space:nowrap}
+.map-sequence-hint{margin:4px 0 13px;color:#788c81;font-size:12px;line-height:1.45}
+.map-sequence-list{padding:0;margin:0;list-style:none;display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px}
+.map-sequence-list>li{min-width:0}
+.sequence-stop{width:100%;height:100%;display:flex;align-items:center;gap:10px;text-align:left;border:1px solid #e3eae3;background:#f8fbf6;border-radius:12px;padding:10px;min-height:62px;color:#21463c}
+.sequence-stop:hover,.sequence-stop:focus-visible{border-color:#9acb79;background:#eff9eb}
+.sequence-number{min-width:31px;height:31px;display:grid;place-items:center;border-radius:10px;background:#dfece1;color:#28564b;font-size:12px;font-weight:900}
+.sequence-address{min-width:0;display:flex;flex-direction:column;gap:3px}
+.sequence-address strong{font-size:12px;font-weight:800;line-height:1.35;overflow-wrap:anywhere}
+.sequence-address small{font-size:10px;color:#8a9a8f}
+.sequence-stop.current{background:#eafbce;border-color:#97d263}
+.sequence-stop.current .sequence-number{background:#193f31;color:#eafbce}
+.sequence-stop.current .sequence-address small{color:#376c42;font-weight:800}
+.sequence-stop.done{opacity:.55}
+.sequence-empty{padding:14px;color:#89998d;font-size:12px;border-radius:10px;background:#f7f9f6}
+/* Marcador com ponta alinhada à coordenada real — sem rotação no elemento gerenciado pelo MapLibre. */
+.map-pin{width:40px;height:45px;border:0;box-shadow:none;background:transparent;border-radius:0;transform:none;display:flex;align-items:flex-start;justify-content:center;position:relative;padding:0}
+.map-pin .pin-label{display:flex;width:35px;height:35px;align-items:center;justify-content:center;background:var(--pin-bg,#18866d);color:#fff;border:3px solid white;border-radius:50%;box-shadow:0 4px 14px #19393250;transform:none;position:relative;z-index:2}
+.map-pin::after{content:'';position:absolute;bottom:4px;left:15px;width:10px;height:10px;background:var(--pin-bg,#18866d);transform:rotate(45deg);border-right:2px solid white;border-bottom:2px solid white;z-index:1}
+.map-pin.origin{--pin-bg:#244e91;background:transparent}
+.map-pin.done{--pin-bg:#93a69b;background:transparent}
+.map-pin.next{--pin-bg:#d35b42;background:transparent}
+.map-pin.uncertain{--pin-bg:#b98c4d;background:transparent}
+.map-pin.group{--pin-bg:#205c53;background:transparent}
+.map-pin.is-selected .pin-label{border-color:#d3ff84;box-shadow:0 0 0 5px #b7f47666,0 4px 14px #19393250}
+@media(max-width:780px){.map-route-overview{flex-direction:column;align-items:flex-start;gap:12px}.map-route-overview-stats{width:100%;justify-content:space-between;gap:10px}.map-route-overview-main strong{font-size:16px}.map-route-sequence{padding:16px}.map-sequence-list{grid-template-columns:1fr}}
+
+.next-stop .next-actions .btn-outline{color:#f7fff4;background:#24594e;border-color:#81b49c}
+.next-stop .next-actions .btn-outline:hover{background:#316b5b}

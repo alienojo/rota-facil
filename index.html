@@ -88,6 +88,18 @@
       <!-- MAPA: área isolada, com cartão flutuante ativado pelo pino. -->
       <section class="tab-panel" id="panel-mapa" role="tabpanel" aria-labelledby="tab-mapa" hidden>
         <div class="page-head map-page-head"><div><span class="overline">ACOMPANHE CADA DESTINO</span><h1>Seu mapa<span class="accent-point">.</span></h1><p>Toque em um pino para abrir os detalhes da entrega.</p></div><span id="map-badge" class="count-pill">Em preparação</span></div>
+        <section class="map-route-overview" aria-label="Informações da rota">
+          <div class="map-route-overview-main">
+            <span class="overline">ESTADO DA ROTA</span>
+            <strong id="map-route-phase">Preparando entregas</strong>
+            <p id="map-route-note">Cadastre endereços na aba Entregas. Depois, toque em Otimizar rota.</p>
+          </div>
+          <div class="map-route-overview-stats" aria-live="polite">
+            <div><small>PENDENTES</small><strong id="map-route-pending">0</strong></div>
+            <div><small>DISTÂNCIA</small><strong id="map-route-km">—</strong></div>
+            <div><small>TEMPO</small><strong id="map-route-time">—</strong></div>
+          </div>
+        </section>
         <div class="map-card">
           <div class="map-toolbar"><div><strong>Visão geral da rota</strong><small id="map-status" role="status">Os destinos aparecem após o cadastro.</small></div><div class="map-toolbar-actions"><button id="btn-gps" type="button" class="map-tool" aria-pressed="false">◎ GPS</button><button id="btn-enquadrar" type="button" class="map-tool fit" title="Enquadrar entregas" aria-label="Enquadrar entregas">⛶</button></div></div>
           <div class="map-stage">
@@ -105,8 +117,14 @@
           </div>
           <div class="map-footer"><span id="gps-message">● Origem &nbsp; ● Entregas &nbsp; ● GPS</span><small id="map-provider">Dados de mapa © OpenStreetMap</small></div>
         </div>
+        <article id="next-stop" class="next-stop hidden" aria-label="Entrega atual"><div class="next-head"><span>DESTINO ATUAL</span><small id="next-progress"></small></div><div class="next-main"><span id="next-number" class="next-index">1</span><strong id="next-address"></strong></div><p id="arrival-note" class="arrival-note hidden"></p><div class="next-actions"><a id="next-navigate" class="btn btn-lime" href="#" target="_blank" rel="noopener noreferrer">↗ Navegar até aqui</a><button id="next-done" class="btn btn-outline" type="button">✓ Marcar entregue</button></div></article>
+        <section class="map-route-sequence card" aria-labelledby="map-sequence-title">
+          <div class="map-sequence-top"><div><span class="overline">ORDEM DE VISITAS</span><h2 id="map-sequence-title">Sequência das entregas</h2></div><span id="map-sequence-status" class="map-sequence-badge">Aguardando</span></div>
+          <p id="map-sequence-hint" class="map-sequence-hint">A ordem definitiva aparece depois de otimizar a rota.</p>
+          <ol id="map-sequence-list" class="map-sequence-list" aria-label="Ordem das paradas"></ol>
+        </section>
         <details class="origin-settings"><summary>⌖ Ponto de partida <strong id="origin-label">São José dos Campos, SP</strong><span aria-hidden="true">⌄</span></summary><div class="origin-controls"><input id="origin-input" class="field" type="text" placeholder="Rua, número e cidade"><button id="btn-definir-origem" class="btn btn-dark" type="button">Definir origem</button><button id="btn-origem-gps" class="btn btn-outline" type="button">◎ Meu GPS</button></div><p id="origin-status">Por padrão, a rota começa no centro de São José dos Campos.</p></details>
-        <article id="next-stop" class="next-stop hidden"><div class="next-head"><span>PRÓXIMA ENTREGA</span><small id="next-progress"></small></div><div class="next-main"><span id="next-number" class="next-index">1</span><strong id="next-address"></strong></div><p id="arrival-note" class="arrival-note hidden"></p><div class="next-actions"><a id="next-navigate" class="btn btn-lime" href="#" target="_blank" rel="noopener noreferrer">↗ Navegar</a><button id="next-done" class="btn btn-outline" type="button">✓ Entregue</button></div></article>
+        
       </section>
 
       <!-- RESUMO: indicadores separados do fluxo de cadastro. -->
